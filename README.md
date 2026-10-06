@@ -2,6 +2,8 @@
 
 Real-time token usage, context limits, per-turn duration, and telemetry for Antigravity and Antigravity IDE.
 
+![Antigravity Metrics](screenshot.png)
+
 ## Features
 
 - **Header button** showing context usage: `[ 📊 4.8% (48.2k) ]`
