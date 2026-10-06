@@ -3,8 +3,10 @@ try {
     const fs = require('fs');
     const path = require('path');
     const os = require('os');
+    const child_process = require('child_process');
     const CONFIG_FILE = path.join(os.homedir(), '.antigravity-metrics.json');
     const BRAIN_DIR = path.join(os.homedir(), '.gemini', 'antigravity', 'brain');
+    const DB_PATH = path.join(os.homedir(), '.gemini', 'antigravity', 'conversation_summaries.db');
 
     let currentWatchedPath = null;
     let currentWatcher = null;
@@ -28,16 +30,100 @@ try {
         return text;
     }
 
+    function findConversationIdByTitle(title) {
+        if (!title || typeof title !== 'string') return null;
+        const clean = title.trim();
+        if (!clean || clean.length < 2 || clean === 'Active Conversation' || clean === 'New Conversation') return null;
+
+        try {
+            if (!fs.existsSync(DB_PATH)) return null;
+            const sqliteBin = process.platform === 'darwin' ? '/usr/bin/sqlite3' : 'sqlite3';
+            const escaped = clean.replace(/'/g, "''");
+            const sql = `SELECT conversation_id FROM conversation_summaries WHERE title = '${escaped}' OR title LIKE '${escaped}%' OR title LIKE '%${escaped}%' ORDER BY last_modified_time DESC LIMIT 1;`;
+            const out = child_process.execFileSync(sqliteBin, [DB_PATH, sql], {
+                encoding: 'utf8',
+                timeout: 500,
+                stdio: ['ignore', 'pipe', 'ignore']
+            }).trim();
+            if (out && /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i.test(out)) {
+                return out;
+            }
+        } catch (_) {}
+        return null;
+    }
+
+    function findMostRecentConversationId() {
+        try {
+            if (!fs.existsSync(DB_PATH)) return null;
+            const sqliteBin = process.platform === 'darwin' ? '/usr/bin/sqlite3' : 'sqlite3';
+            const sql = `SELECT conversation_id FROM conversation_summaries ORDER BY last_user_input_time DESC, last_modified_time DESC LIMIT 1;`;
+            const out = child_process.execFileSync(sqliteBin, [DB_PATH, sql], {
+                encoding: 'utf8',
+                timeout: 500,
+                stdio: ['ignore', 'pipe', 'ignore']
+            }).trim();
+            if (out && /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i.test(out)) {
+                return out;
+            }
+        } catch (_) {}
+        return null;
+    }
+
+    function getConversationMetadata(convId) {
+        if (!convId) return null;
+        try {
+            if (!fs.existsSync(DB_PATH)) return null;
+            const sqliteBin = process.platform === 'darwin' ? '/usr/bin/sqlite3' : 'sqlite3';
+            const escapedId = convId.replace(/'/g, "''");
+            const sql = `SELECT title, last_user_input_time FROM conversation_summaries WHERE conversation_id = '${escapedId}' LIMIT 1;`;
+            const out = child_process.execFileSync(sqliteBin, [DB_PATH, sql], {
+                encoding: 'utf8',
+                timeout: 500,
+                stdio: ['ignore', 'pipe', 'ignore']
+            }).trim();
+            if (out) {
+                const parts = out.split('|');
+                return {
+                    title: parts[0] || '',
+                    lastUserInputTime: parts[1] || ''
+                };
+            }
+        } catch (_) {}
+        return null;
+    }
+
     function findTranscriptForChat(query) {
         try {
             if (!fs.existsSync(BRAIN_DIR)) return null;
 
-            // Direct ID match
-            if (query && query.id) {
+            // If explicitly a new empty conversation, never attach old transcripts
+            if (query && (query.isNewConversation || query.title === 'New Conversation')) {
+                return null;
+            }
+
+            // 1. Direct ID match
+            if (query && query.id && /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i.test(query.id)) {
                 const direct = path.join(BRAIN_DIR, query.id, '.system_generated', 'logs', 'transcript.jsonl');
                 if (fs.existsSync(direct)) return direct;
             }
 
+            // 2. Query title via SQLite conversation_summaries.db
+            if (query && query.title) {
+                const resolvedId = findConversationIdByTitle(query.title);
+                if (resolvedId) {
+                    const direct = path.join(BRAIN_DIR, resolvedId, '.system_generated', 'logs', 'transcript.jsonl');
+                    if (fs.existsSync(direct)) return direct;
+                }
+            }
+
+            // 3. Fallback: most recently active conversation from SQLite
+            const mostRecentId = findMostRecentConversationId();
+            if (mostRecentId) {
+                const direct = path.join(BRAIN_DIR, mostRecentId, '.system_generated', 'logs', 'transcript.jsonl');
+                if (fs.existsSync(direct)) return direct;
+            }
+
+            // 4. Disk fallback: scan directory mtime
             const entries = fs.readdirSync(BRAIN_DIR, { withFileTypes: true });
             const convDirs = [];
             for (const e of entries) {
@@ -51,31 +137,8 @@ try {
                 } catch (_) {}
                 convDirs.push({ id: e.name, fullPath, tPath, mtimeMs });
             }
-
-            // Sort by actual transcript modification time descending
             convDirs.sort((a, b) => b.mtimeMs - a.mtimeMs);
 
-            // If title or firstPrompt provided, search recent transcripts (skip generic titles)
-            if (query && (query.title || query.firstPrompt)) {
-                const rawTarget = (query.firstPrompt || query.title || '').trim().toLowerCase();
-                if (rawTarget.length > 3 && rawTarget !== 'active conversation' && rawTarget !== 'new conversation') {
-                    const target = rawTarget.slice(0, 30);
-                    for (const d of convDirs.slice(0, 30)) {
-                        try {
-                            const fd = fs.openSync(d.tPath, 'r');
-                            const buf = Buffer.alloc(8192);
-                            const bytes = fs.readSync(fd, buf, 0, 8192, 0);
-                            fs.closeSync(fd);
-                            const snippet = buf.toString('utf8', 0, bytes).toLowerCase();
-                            if (snippet.includes(target)) {
-                                return d.tPath;
-                            }
-                        } catch (_) {}
-                    }
-                }
-            }
-
-            // Fallback to most recently updated transcript
             if (convDirs.length > 0) {
                 return convDirs[0].tPath;
             }
@@ -164,9 +227,12 @@ try {
             const lastStep = lines.length > 0 ? JSON.parse(lines[lines.length - 1]) : null;
             const isAgentRunning = lastStep ? lastStep.status === 'RUNNING' : false;
 
-            const derivedTitle = firstPrompt
-                ? (firstPrompt.length > 36 ? firstPrompt.slice(0, 36) + '...' : firstPrompt)
-                : 'New Conversation';
+            const meta = getConversationMetadata(convId);
+            const derivedTitle = (meta && meta.title)
+                ? meta.title
+                : (firstPrompt
+                    ? (firstPrompt.length > 36 ? firstPrompt.slice(0, 36) + '...' : firstPrompt)
+                    : 'Active Conversation');
 
             return {
                 conversationId: convId,
@@ -200,6 +266,15 @@ try {
             return null;
         }
     }
+
+    try {
+        win.on('closed', () => {
+            if (currentWatcher) {
+                try { currentWatcher.close(); } catch (_) {}
+                currentWatcher = null;
+            }
+        });
+    } catch (_) {}
 
     let watchDebounceTimer = null;
     function watchTranscript(tPath) {

@@ -155,9 +155,11 @@
         // Request updated metrics from main process transcript monitor
         function requestTranscriptUpdate(chatQuery) {
             try {
+                const active = detectActiveChat();
                 const payload = chatQuery || {
-                    id: state.currentChatId,
-                    title: state.currentChatTitle
+                    id: state.currentChatId || active.id || '',
+                    title: state.currentChatTitle || active.title || '',
+                    isNewConversation: active.isNewConversation || false
                 };
                 console.log('REQUEST_TRANSCRIPT_METRICS|' + JSON.stringify(payload));
             } catch (_) {}
@@ -167,18 +169,21 @@
         window.__ANTIGRAVITY_METRICS_UPDATE__ = function(data) {
             if (!data) return;
 
-            // If we are currently in an empty new session with 0 messages, do not adopt an old transcript!
             const activeChat = detectActiveChat();
-            if (activeChat.isEmpty && !state.isGenerating) {
+            // Only drop if user is in an unstarted new conversation with 0 messages and data has no rounds
+            if (activeChat.isNewConversation && (!data.rounds || data.rounds.length === 0) && !state.isGenerating) {
                 return;
             }
 
-            // If update contains a conversationId and we know our currentChatId, verify match
+            // If update contains a conversationId, verify against active chat if known
             if (data.conversationId) {
-                if (!state.currentChatId) {
-                    state.currentChatId = data.conversationId;
-                } else if (state.currentChatId !== data.conversationId) {
+                if (activeChat.id && activeChat.id !== data.conversationId) {
+                    // Update is for a different conversation than active view
                     return;
+                }
+                state.currentChatId = data.conversationId;
+                if (!state.currentChatKey || state.currentChatKey === 'default-chat') {
+                    state.currentChatKey = data.conversationId;
                 }
             }
 
@@ -197,14 +202,20 @@
                 state.rounds = data.rounds;
             }
 
+            const cacheEntry = {
+                sessionStats: { ...state.sessionStats },
+                latestRoundStats: { ...state.latestRoundStats },
+                rounds: Array.isArray(state.rounds) ? [...state.rounds] : [],
+                hasTranscriptData: true,
+                title: state.currentChatTitle,
+                id: state.currentChatId
+            };
+
             if (state.currentChatKey) {
-                state.chatMetricsCache[state.currentChatKey] = {
-                    sessionStats: { ...state.sessionStats },
-                    latestRoundStats: { ...state.latestRoundStats },
-                    hasTranscriptData: true,
-                    title: state.currentChatTitle,
-                    id: state.currentChatId
-                };
+                state.chatMetricsCache[state.currentChatKey] = cacheEntry;
+            }
+            if (data.conversationId) {
+                state.chatMetricsCache[data.conversationId] = cacheEntry;
             }
 
             updateUI();
@@ -369,19 +380,87 @@
             document.head.appendChild(style);
         }
 
+        function getReactFiber(node) {
+            if (!node) return null;
+            for (const key in node) {
+                if (key.startsWith('__reactFiber$') || key.startsWith('__reactInternalInstance$')) {
+                    return node[key];
+                }
+            }
+            return null;
+        }
+
+        function findActiveCascadeId() {
+            try {
+                // 1. Direct attribute check on any tagged element
+                const tagged = document.querySelector('[data-cascade-id], [data-conversation-id], [data-chat-id], [data-session-id]');
+                if (tagged) {
+                    const val = tagged.getAttribute('data-cascade-id') ||
+                                tagged.getAttribute('data-conversation-id') ||
+                                tagged.getAttribute('data-chat-id') ||
+                                tagged.getAttribute('data-session-id');
+                    if (val && /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i.test(val)) {
+                        return val;
+                    }
+                }
+
+                // 2. Scan React fibers on container elements
+                const selectors = [
+                    '.overflow-y-auto',
+                    '[class*="cascade"]',
+                    '[class*="conversation"]',
+                    '[class*="chat"]',
+                    '.tab.active',
+                    '[role="tab"][aria-selected="true"]',
+                    'textarea',
+                    '[contenteditable="true"]',
+                    'main',
+                    '#workbench\\.parts\\.editor',
+                    '.editor-instance'
+                ];
+                const elements = document.querySelectorAll(selectors.join(', '));
+                for (const el of elements) {
+                    const fiber = getReactFiber(el);
+                    if (!fiber) continue;
+                    let curr = fiber;
+                    let depth = 0;
+                    while (curr && depth < 30) {
+                        const props = curr.memoizedProps;
+                        if (props) {
+                            const cid = props.cascadeId || props.conversationId || props.activeCascadeId || props.sessionId;
+                            if (cid && typeof cid === 'string' && /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i.test(cid)) {
+                                return cid;
+                            }
+                            if (props.session && typeof props.session.id === 'string' && /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i.test(props.session.id)) {
+                                return props.session.id;
+                            }
+                        }
+                        curr = curr.return;
+                        depth++;
+                    }
+                }
+            } catch (_) {}
+            return null;
+        }
+
         // Active Chat Identification
         function detectActiveChat() {
             let title = '';
             let id = '';
 
-            // 1. Detect from URL (if available)
-            try {
-                const href = window.location.href;
-                const match = href.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i);
-                if (match) id = match[0];
-            } catch (_) {}
+            // 1. Detect conversation UUID via React Fiber & DOM attributes
+            id = findActiveCascadeId() || '';
 
-            // 2. Detect from active sidebar item (scoped strictly to navigation / sidebar containers)
+            // 2. Detect from URL (if available)
+            if (!id) {
+                try {
+                    const href = window.location.href;
+                    const match = href.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i);
+                    if (match) id = match[0];
+                } catch (_) {}
+            }
+
+            // 3. Detect from active sidebar item (scoped to navigation/sidebar)
             try {
                 const sidebarContainers = document.querySelectorAll(
                     'nav, aside, [role="navigation"], [data-testid*="sidebar"], [data-testid*="conversation-list"], [class*="sidebar"]'
@@ -389,19 +468,24 @@
 
                 for (const nav of sidebarContainers) {
                     const activeItem = nav.querySelector(
-                        '[aria-selected="true"], [data-state="active"], [data-state="selected"], [data-active="true"], .active'
+                        '[aria-selected="true"], [data-state="active"], [data-state="selected"], [data-active="true"], [class*="selected"], .active'
                     );
                     if (activeItem) {
-                        const dataId = activeItem.getAttribute('data-conversation-id') ||
-                                       activeItem.getAttribute('data-id') ||
-                                       activeItem.getAttribute('data-chat-id') ||
-                                       activeItem.getAttribute('data-session-id');
-                        if (dataId) id = dataId;
+                        if (!id) {
+                            const dataId = activeItem.getAttribute('data-conversation-id') ||
+                                           activeItem.getAttribute('data-cascade-id') ||
+                                           activeItem.getAttribute('data-id') ||
+                                           activeItem.getAttribute('data-chat-id') ||
+                                           activeItem.getAttribute('data-session-id');
+                            if (dataId && /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i.test(dataId)) {
+                                id = dataId;
+                            }
+                        }
 
                         const link = activeItem.matches('a') ? activeItem : activeItem.querySelector('a');
-                        if (link && link.href) {
+                        if (link && link.href && !id) {
                             const linkMatch = link.href.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i);
-                            if (linkMatch && !id) id = linkMatch[0];
+                            if (linkMatch) id = linkMatch[0];
                         }
 
                         const titleEl = activeItem.querySelector('.title, [class*="title"], h3, h4, span') || activeItem;
@@ -415,7 +499,18 @@
                 }
             } catch (_) {}
 
-            // 3. Detect from breadcrumb or header title
+            // 4. Detect from active editor tab
+            if (!title) {
+                const activeTab = document.querySelector('.tab.active .label-name, [role="tab"][aria-selected="true"]');
+                if (activeTab) {
+                    const t = activeTab.textContent?.trim() || '';
+                    if (t && t.length > 1 && !t.includes('.')) {
+                        title = t;
+                    }
+                }
+            }
+
+            // 5. Detect from breadcrumb or header title
             if (!title) {
                 const headerEl =
                     document.querySelector('[data-testid="conversation-title"]') ||
@@ -427,28 +522,27 @@
                 }
             }
 
-            // 4. Fallback to first user input in the chat view (index 0, never a random turn)
-            const userSteps = document.querySelectorAll(
-                '[data-testid="user-input-step"], [data-testid="chat-user-message"], [data-role="user"]'
+            // 6. Check for messages presence in DOM
+            const messageElements = document.querySelectorAll(
+                '[data-testid="chat-message"], [data-testid="user-input-step"], [data-role="user"], .prose, .markdown-body, [class*="message-bubble"]'
             );
-            const hasMessages = userSteps.length > 0 || Boolean(document.querySelector('[data-testid="chat-message"], .prose, .markdown-body'));
+            const hasMessages = messageElements.length > 0;
 
-            if (!title && userSteps.length > 0) {
-                let raw = userSteps[0].textContent?.trim() || '';
-                const reqMatch = raw.match(/<USER_REQUEST>([\s\S]*?)<\/USER_REQUEST>/i);
-                if (reqMatch) raw = reqMatch[1];
-                raw = raw.replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim();
-                if (raw) {
-                    title = raw.slice(0, 36) + (raw.length > 36 ? '...' : '');
-                }
-            }
+            // 7. Check if this is explicitly a new unstarted conversation
+            const isExplicitNewConvo = (title === 'New Conversation' || title === 'New Chat') ||
+                (!hasMessages && !id && !title);
 
             if (!title) {
-                title = hasMessages ? 'Active Conversation' : 'New Conversation';
+                title = isExplicitNewConvo ? 'New Conversation' : (hasMessages ? 'Active Conversation' : 'New Conversation');
             }
 
             const key = id || (title !== 'New Conversation' && title !== 'Active Conversation' ? title : '');
-            return { title, id, key: key || 'default-chat', isEmpty: !hasMessages && userSteps.length === 0 };
+            return {
+                title,
+                id,
+                key: key || 'default-chat',
+                isNewConversation: isExplicitNewConvo && !hasMessages
+            };
         }
 
         // Analyze DOM metrics specifically for the active chat
@@ -467,7 +561,7 @@
                         state.currentChatId = activeChat.id;
                     }
 
-                    if (activeChat.isEmpty) {
+                    if (activeChat.isNewConversation) {
                         state.sessionStats = {
                             totalTokens: 0,
                             totalRounds: 0,
@@ -485,36 +579,22 @@
                         };
                         state.hasTranscriptData = true;
                         state.currentChatTitle = 'New Conversation';
-                    } else if (state.chatMetricsCache[activeChat.key]) {
-                        const cached = state.chatMetricsCache[activeChat.key];
+                        state.currentChatId = '';
+                    } else if (state.chatMetricsCache[activeChat.key] || (activeChat.id && state.chatMetricsCache[activeChat.id])) {
+                        const cached = state.chatMetricsCache[activeChat.key] || state.chatMetricsCache[activeChat.id];
                         state.sessionStats = { ...cached.sessionStats };
                         if (cached.latestRoundStats) state.latestRoundStats = { ...cached.latestRoundStats };
+                        if (Array.isArray(cached.rounds)) state.rounds = cached.rounds;
                         state.hasTranscriptData = cached.hasTranscriptData || false;
                         if (cached.title) state.currentChatTitle = cached.title;
                         if (cached.id) state.currentChatId = cached.id;
                         requestTranscriptUpdate(activeChat);
                     } else {
-                        state.sessionStats = {
-                            totalTokens: 0,
-                            totalRounds: 0,
-                            totalSteps: 0,
-                            totalTools: 0
-                        };
-                        state.latestRoundStats = {
-                            durationMs: 0,
-                            inputTokens: 0,
-                            outputTokens: 0,
-                            thinkingTokens: 0,
-                            totalRoundTokens: 0,
-                            toolCount: 0,
-                            toolsList: []
-                        };
-                        state.hasTranscriptData = false;
                         requestTranscriptUpdate(activeChat);
                     }
                 }
 
-                if (activeChat.isEmpty && !state.isGenerating) {
+                if (activeChat.isNewConversation && !state.isGenerating) {
                     state.sessionStats.totalTokens = 0;
                     state.sessionStats.totalRounds = 0;
                     state.latestRoundStats = {
