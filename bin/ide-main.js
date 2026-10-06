@@ -14,6 +14,14 @@ const __dirname = path.dirname(__filename);
 const CONFIG_FILE = path.join(os.homedir(), '.antigravity-metrics.json');
 const BRAIN_DIR = path.join(os.homedir(), '.gemini', 'antigravity', 'brain');
 const DB_PATH = path.join(os.homedir(), '.gemini', 'antigravity', 'conversation_summaries.db');
+const LOG_FILE = path.join(os.tmpdir(), 'antigravity-metrics.log');
+
+function log(...args) {
+    try {
+        const line = `[${new Date().toISOString()}] ` + args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' ') + '\n';
+        fs.appendFileSync(LOG_FILE, line);
+    } catch (_) {}
+}
 
 function estimateTokensFast(text) {
     if (!text || typeof text !== 'string') return 0;
@@ -351,9 +359,10 @@ app.on('browser-window-created', (_event, win) => {
         }
     });
 
-    const injectScript = async () => {
+    const injectScript = async (sourceEvent = 'dom-ready') => {
         try {
             const url = win.webContents.getURL() || '';
+            log(`[${sourceEvent}] Window URL:`, url);
             if (!url.includes('workbench') && !url.includes('jetski') && !url.endsWith('.html') && url !== '') {
                 return;
             }
@@ -368,13 +377,16 @@ app.on('browser-window-created', (_event, win) => {
             const clientPath = path.join(__dirname, 'antigravity-metrics-client.js');
             if (fs.existsSync(clientPath)) {
                 let clientCode = fs.readFileSync(clientPath, 'utf8');
-                clientCode = `const __METRICS_CONFIG__ = ${JSON.stringify(metricsConfig)};\n` + clientCode;
+                clientCode = `var __METRICS_CONFIG__ = ${JSON.stringify(metricsConfig)};\n` + clientCode;
                 await win.webContents.executeJavaScript(clientCode);
+                log(`[${sourceEvent}] Successfully injected antigravity-metrics-client.js into:`, url);
             }
 
             pushMetricsToWindow();
-        } catch (_) {}
+        } catch (err) {
+            log(`[${sourceEvent}] Injection error:`, err.message);
+        }
     };
 
-    win.webContents.on('dom-ready', () => injectScript());
+    win.webContents.on('dom-ready', () => injectScript('dom-ready'));
 });

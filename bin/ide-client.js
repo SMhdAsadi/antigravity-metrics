@@ -524,7 +524,7 @@
 
             // 6. Check for messages presence in DOM
             const messageElements = document.querySelectorAll(
-                '[data-testid="chat-message"], [data-testid="user-input-step"], [data-role="user"], .prose, .markdown-body, [class*="message-bubble"]'
+                '[aria-label="User message"], [aria-label="Agent response"], [data-testid="chat-message"], [data-testid="user-input-step"], [data-role="user"], [data-testid="conversation-view"] .leading-relaxed, .prose, .markdown-body, [class*="message-bubble"]'
             );
             const hasMessages = messageElements.length > 0;
 
@@ -610,7 +610,7 @@
                 } else if (!state.hasTranscriptData) {
                     // Only scrape DOM if we don't have transcript data yet and chat is not empty
                     const messageElements = document.querySelectorAll(
-                        '[data-testid="chat-message"], [data-testid="user-input-step"], [data-testid="conversation-view"] .prose, .prose, .markdown-body'
+                        '[aria-label="User message"], [aria-label="Agent response"], [data-testid="chat-message"], [data-testid="user-input-step"], [data-testid="conversation-view"] .leading-relaxed, .prose, .markdown-body'
                     );
 
                     let aggregatedTokens = 0;
@@ -715,12 +715,12 @@
         function attachMessageBadges() {
             if (!state.config.showMsgBadges) return;
             const assistantReplies = document.querySelectorAll(
-                '[data-testid="chat-message"]:not([data-testid="user-input-step"])'
+                '[aria-label="Agent response"], [data-testid="conversation-view"] .leading-relaxed.select-text, [data-testid="chat-message"]:not([data-testid="user-input-step"])'
             );
 
             const replyList = assistantReplies.length > 0
                 ? Array.from(assistantReplies)
-                : Array.from(document.querySelectorAll('.prose')).filter(el => !el.closest('[data-testid="chat-message"]'));
+                : Array.from(document.querySelectorAll('.prose, [data-testid="conversation-view"] .leading-relaxed')).filter(el => !el.closest('[data-testid="chat-message"], [data-testid="user-input-step"], [aria-label="User message"]'));
 
             const total = replyList.length;
             replyList.forEach((replyEl, idx) => {
@@ -772,9 +772,14 @@
             });
         }
 
-        // Find the native actions container in Antigravity header
+        // Find the native actions container in Antigravity header (Supports Standalone App & Antigravity IDE)
         function getHeaderActionsContainer() {
             return (
+                document.querySelector('button[aria-label="New Conversation"]')?.parentElement ||
+                document.querySelector('button[aria-label="More actions"]')?.parentElement ||
+                document.querySelector('button[aria-label="Close panel"]')?.parentElement ||
+                document.querySelector('.composite.title .title-actions') ||
+                document.querySelector('.pane-header .actions') ||
                 document.querySelector('[data-testid="install-editor"]')?.parentElement ||
                 document.querySelector('[data-testid="titlebar-more-actions"]')?.parentElement ||
                 document.getElementById('rtl-topbar-wrapper')?.parentElement ||
@@ -785,19 +790,10 @@
             );
         }
 
-        // Dedicated Topbar Button (Fixes Issue 4 & Issue 6)
+        // Dedicated Topbar Button (Supports Standalone App & IDE Agent panel header)
         function ensureTopbarButton() {
             let btn = document.getElementById('agm-topbar-btn');
             if (!btn) {
-                const chartSvg = `
-                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0 opacity-80" style="margin-right:2px;">
-                        <path d="M3 3v18h18"></path>
-                        <path d="M18 17V9"></path>
-                        <path d="M13 17V5"></path>
-                        <path d="M8 17v-3"></path>
-                    </svg>
-                `;
-
                 btn = el('button', null, null, {
                     id: 'agm-topbar-btn',
                     type: 'button',
@@ -805,11 +801,31 @@
                     title: 'Antigravity Metrics (⌥M / Alt+M)'
                 });
 
-                btn.innerHTML = `
-                    ${chartSvg}
-                    <span id="agm-topbar-pct" style="font-weight:600;color:#10b981;">0.0%</span>
-                    <span id="agm-topbar-tokens" style="opacity:0.65;font-size:11px;">(0k)</span>
-                `;
+                const svgNS = 'http://www.w3.org/2000/svg';
+                const svg = document.createElementNS(svgNS, 'svg');
+                svg.setAttribute('width', '13');
+                svg.setAttribute('height', '13');
+                svg.setAttribute('viewBox', '0 0 24 24');
+                svg.setAttribute('fill', 'none');
+                svg.setAttribute('stroke', 'currentColor');
+                svg.setAttribute('stroke-width', '2');
+                svg.setAttribute('stroke-linecap', 'round');
+                svg.setAttribute('stroke-linejoin', 'round');
+                svg.setAttribute('class', 'shrink-0 opacity-80');
+                svg.style.marginRight = '2px';
+
+                for (const d of ['M3 3v18h18', 'M18 17V9', 'M13 17V5', 'M8 17v-3']) {
+                    const path = document.createElementNS(svgNS, 'path');
+                    path.setAttribute('d', d);
+                    svg.appendChild(path);
+                }
+
+                const pctSpan = el('span', 'font-weight:600;color:#10b981;', '0.0%', { id: 'agm-topbar-pct' });
+                const tokensSpan = el('span', 'opacity:0.65;font-size:11px;', '(0k)', { id: 'agm-topbar-tokens' });
+
+                btn.appendChild(svg);
+                btn.appendChild(pctSpan);
+                btn.appendChild(tokensSpan);
 
                 btn.addEventListener('click', (e) => {
                     e.preventDefault();
@@ -823,8 +839,11 @@
             if (actionsCluster && btn.parentElement !== actionsCluster) {
                 const rtlWrapper = document.getElementById('rtl-topbar-wrapper');
                 const installBtn = document.querySelector('[data-testid="install-editor"]');
+                const newChatBtn = document.querySelector('button[aria-label="New Conversation"]');
 
-                if (rtlWrapper && rtlWrapper.parentElement === actionsCluster) {
+                if (newChatBtn && newChatBtn.parentElement === actionsCluster) {
+                    actionsCluster.insertBefore(btn, newChatBtn);
+                } else if (rtlWrapper && rtlWrapper.parentElement === actionsCluster) {
                     actionsCluster.insertBefore(btn, rtlWrapper);
                 } else if (installBtn && installBtn.parentElement === actionsCluster) {
                     actionsCluster.insertBefore(btn, installBtn);
@@ -1209,43 +1228,65 @@
             }
         }
 
+        function getStatusBarTarget() {
+            return (
+                document.querySelector('.part.statusbar .right-items') ||
+                document.querySelector('.part.statusbar .items-container.right-items') ||
+                document.querySelector('[id="workbench.parts.statusbar"] .right-items') ||
+                document.querySelector('.part.statusbar') ||
+                document.querySelector('[id="workbench.parts.statusbar"]') ||
+                null
+            );
+        }
+
         // Status bar integration for IDE
         function tryInsertStatusBarItem() {
-            const statusBar = document.querySelector('.part.statusbar .right-items') ||
-                              document.querySelector('.part.statusbar .items-container.right-items') ||
-                              document.querySelector('[id="workbench.parts.statusbar"] .right-items');
-            if (!statusBar || document.getElementById('antigravity-metrics-statusbar-btn')) return;
+            const statusBar = getStatusBarTarget();
+            if (!statusBar) return;
 
-            const item = el('a', `
-                cursor: pointer !important;
-                padding: 0 8px !important;
-                display: inline-flex !important;
-                align-items: center !important;
-                justify-content: center !important;
-                font-size: 11px !important;
-                height: 100% !important;
-                line-height: 22px !important;
-                user-select: none !important;
-                text-decoration: none !important;
-                white-space: nowrap !important;
-                color: #10b981 !important;
-                opacity: 0.95;
-            `, [
-                el('span', null, '📊 0.0% (0k)')
-            ], {
-                id: 'antigravity-metrics-statusbar-btn',
-                className: 'statusbar-item right',
-                href: '#',
-                title: 'Antigravity Metrics (Alt+M / ⌥M)'
-            });
+            let item = document.getElementById('antigravity-metrics-statusbar-btn');
+            if (!item) {
+                item = el('a', `
+                    cursor: pointer !important;
+                    padding: 0 8px !important;
+                    display: inline-flex !important;
+                    align-items: center !important;
+                    justify-content: center !important;
+                    font-size: 11px !important;
+                    height: 100% !important;
+                    line-height: 22px !important;
+                    user-select: none !important;
+                    text-decoration: none !important;
+                    white-space: nowrap !important;
+                    color: #10b981 !important;
+                    opacity: 0.95;
+                    box-sizing: border-box !important;
+                `, [
+                    el('span', null, '📊 0.0% (0k)')
+                ], {
+                    id: 'antigravity-metrics-statusbar-btn',
+                    className: 'statusbar-item right',
+                    href: '#',
+                    title: 'Antigravity Metrics (Alt+M / ⌥M)'
+                });
 
-            item.addEventListener('click', (e) => {
-                e.preventDefault();
-                e.stopPropagation();
-                toggleDashboard();
-            });
+                item.addEventListener('click', (e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    toggleDashboard();
+                });
 
-            statusBar.insertBefore(item, statusBar.firstChild);
+                item.addEventListener('mouseenter', () => {
+                    item.style.backgroundColor = 'var(--vscode-statusBarItem-hoverBackground, rgba(255,255,255,0.12))';
+                });
+                item.addEventListener('mouseleave', () => {
+                    item.style.backgroundColor = 'transparent';
+                });
+            }
+
+            if (statusBar.firstChild !== item) {
+                statusBar.prepend(item);
+            }
         }
 
         // Global Keyboard Shortcut: Alt+M or Option+M
@@ -1293,6 +1334,8 @@
                 ensureTopbarButton();
                 tryInsertStatusBarItem();
                 scanDomMetrics();
+            } catch (err) {
+                console.error('[Antigravity Metrics] runScanAndSync error:', err);
             } finally {
                 setTimeout(() => { isInternalMutation = false; }, 50);
             }
