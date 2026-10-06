@@ -113,9 +113,27 @@ function findTranscriptForChat(query) {
             return null;
         }
 
-        // 1. Direct ID match
+        // 1. Direct ID match (client sends the /c/<uuid> from the URL
+        // plus the selected-row id; url is the SPA ground truth).
+        // A URL-derived id is authoritative: when its transcript is not
+        // on disk yet the conversation is simply brand-new, so return
+        // null instead of fuzzy-matching somebody else's data. A bare
+        // query.id may be a stale cache value, so it only matches when
+        // the file exists and otherwise falls through to the title
+        // lookups below.
+        let urlUuid = null;
+        if (query && query.url) {
+            const urlMatch = String(query.url).match(/\/c\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i);
+            if (urlMatch) urlUuid = urlMatch[1];
+        }
+        if (urlUuid) {
+            const direct = path.join(BRAIN_DIR, urlUuid, '.system_generated', 'logs', 'transcript.jsonl');
+            if (fs.existsSync(direct)) return direct;
+            return null;
+        }
         if (query && query.id && /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i.test(query.id)) {
-            const direct = path.join(BRAIN_DIR, query.id, '.system_generated', 'logs', 'transcript.jsonl');
+            const uuid = query.id.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i)[0];
+            const direct = path.join(BRAIN_DIR, uuid, '.system_generated', 'logs', 'transcript.jsonl');
             if (fs.existsSync(direct)) return direct;
         }
 

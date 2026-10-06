@@ -32,10 +32,9 @@ It gives you full visibility into context consumption, per-chat token tracking, 
   - Calibrated default for **Gemini 3.8 Flash (Antigravity 256k checkpointer limit)**, with options for **Gemini Pro Extended (2M)**, **Claude 3.7 Sonnet (200k)**, **GPT-4o (128k)**, and custom limits.
   - Exact token count and compaction recommendations when approaching the Dumb Zone.
 
-- ⏱️ **Per-Message Execution Telemetry**:
-  - Attached subtle footer badge on each assistant response:
-    `[ 🪙 3.4k tok · ⏱️ 14.2s ]`
-  - Live duration counter (`⚡ 4.2s`) strictly while the agent is actively generating.
+- ⏱️ **Per-Turn Execution Telemetry** (in the dashboard):
+  - Latest turn duration, turn token delta, tool-call count and speed.
+  - Live duration counter while the agent is actively generating.
   - No disruptive global timers when browsing finished chats.
 
 - 🛠️ **Dedicated Topbar Header Button**:
@@ -76,20 +75,15 @@ Clicking the button toggles the **Flyout Dashboard** (`⌥M` / `Alt+M`).
 │ └──────────────────────┴───────────────────────┘ │
 ├──────────────────────────────────────────────────┤
 │ Model Preset: [ Gemini Flash (1,000,000)   ▼ ]   │
-│ [x] Show message token badges                    │
 ├──────────────────────────────────────────────────┤
 │ Shortcut: ⌥M / Alt+M             [Refresh Data] │
 ╰──────────────────────────────────────────────────╯
 ```
 
-### 3. Per-Message Assistant Badge
-Subtle metadata attached to each assistant response:
-```
-  ╭────────────────────────────────────────────────╮
-  │ Agent response markdown text...                │
-  ╰────────────────────────────────────────────────╯
-  [ 🪙 3.4k tok · ⏱️ 12.8s · 🛠️ 2 tools · ⚡ 82 tok/s ]
-```
+### 3. Per-Turn Telemetry Lives In The Dashboard
+Turn duration, turn tokens, tool calls and speed are shown in the
+flyout dashboard's "Latest Turn Telemetry" card — not inline under
+messages, keeping the chat surface clean.
 
 ---
 

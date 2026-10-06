@@ -11,7 +11,6 @@
         const defaultMetricsConfig = {
             modelLimit: 256000,
             modelName: 'Gemini 3.8 Flash (Antigravity 256k)',
-            showMsgBadges: true,
             warnThreshold: 75,
             costPerMIn: 0.075,
             costPerMOut: 0.30
@@ -157,15 +156,23 @@
         function requestTranscriptUpdate(chatQuery) {
             try {
                 const active = detectActiveChat();
+                let href = '';
+                try { href = window.location.href || ''; } catch (_) {}
                 const payload = chatQuery || {
                     id: state.currentChatId || active.id || '',
                     title: state.currentChatTitle || active.title || '',
                     firstPrompt: active.firstPrompt || '',
                     key: active.key || '',
+                    url: href,
                     isNewConversation: active.isNewConversation || false
                 };
+                if (!payload.url) payload.url = href;
                 console.log('REQUEST_TRANSCRIPT_METRICS|' + JSON.stringify(payload));
             } catch (_) {}
+        }
+
+        function isUuid(s) {
+            return typeof s === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s.trim());
         }
 
         // External update handler called by main process bridge
@@ -174,7 +181,9 @@
 
             if (data.notFound) {
                 state.hasTranscriptData = false;
-                state.currentChatId = '';
+                // Keep the id: a "not found" for a known conversation only
+                // means its transcript is not on disk yet (brand-new chat),
+                // not that we forgot which conversation is open.
                 scanDomMetrics();
                 return;
             }
@@ -185,23 +194,21 @@
                 return;
             }
 
-            // If update contains a conversationId, verify against active chat if known
-            if (data.conversationId && activeChat.id && activeChat.id !== data.conversationId) {
+            // Reject only on POSITIVE mismatch: both sides name a concrete,
+            // different conversation id. When our side has no id (e.g. IDE
+            // webview without /c/ in the URL) we cannot verify, so we accept
+            // and adopt the transcript's id instead of freezing the pill.
+            if (isUuid(data.conversationId) && isUuid(activeChat.id) && activeChat.id !== data.conversationId) {
                 return;
-            }
-
-            // Verify firstPrompt if available on both sides to prevent mismatched updates
-            if (activeChat.firstPrompt && data.firstPrompt) {
-                const cleanA = activeChat.firstPrompt.replace(/[^\w\s\u0600-\u06FF]/g, ' ').replace(/\s+/g, ' ').trim().toLowerCase().slice(0, 25);
-                const cleanD = data.firstPrompt.replace(/[^\w\s\u0600-\u06FF]/g, ' ').replace(/\s+/g, ' ').trim().toLowerCase().slice(0, 25);
-                if (cleanA.length >= 4 && cleanD.length >= 4 && !cleanA.includes(cleanD) && !cleanD.includes(cleanA)) {
-                    return;
-                }
             }
 
             if (data.conversationId) {
                 state.currentChatId = data.conversationId;
-                if (!state.currentChatKey || state.currentChatKey === 'default-chat' || state.currentChatKey === 'active-dom-chat') {
+                // Adopt the authoritative key when we know the id. Legacy
+                // placeholder keys ('default-chat', 'active-dom-chat') from
+                // older versions, and any non-id key while the id is known,
+                // are upgraded so future switches hit the cache.
+                if (!state.currentChatKey || state.currentChatKey === 'default-chat' || state.currentChatKey === 'active-dom-chat' || (isUuid(activeChat.id) && state.currentChatKey !== 'id:' + activeChat.id)) {
                     state.currentChatKey = 'id:' + data.conversationId;
                 }
             }
@@ -328,23 +335,6 @@
                     border-color: var(--color-primary, #3b82f6) !important;
                 }
 
-                /* Message Badge attached to each assistant reply */
-                .agm-msg-badge {
-                    display: inline-flex;
-                    align-items: center;
-                    gap: 6px;
-                    margin-top: 6px;
-                    padding: 2px 7px;
-                    border-radius: 4px;
-                    font-size: 10.5px;
-                    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-                    background: var(--muted, rgba(255, 255, 255, 0.04));
-                    border: 1px solid var(--border, rgba(255, 255, 255, 0.08));
-                    color: var(--muted-foreground, #a1a1aa);
-                    user-select: none;
-                    width: fit-content;
-                }
-
                 /* Context Progress Gauge */
                 .agm-progress-bg {
                     width: 100%;
@@ -410,74 +400,55 @@
             return null;
         }
 
+        function findConversationIdInUrl(href) {
+            try {
+                if (!href || typeof href !== 'string') return '';
+                const m = href.match(/\/c\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i)
+                    || href.match(/[?&](?:conversationId|conversation_id|chatId|cascadeId)=([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i)
+                    || href.match(/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i);
+                return m ? m[1] : '';
+            } catch (_) {
+                return '';
+            }
+        }
+
         function findActiveConversationId() {
             try {
-                const uuidRegex = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
+                // 1. URL is ground truth in the Standalone App:
+                // the active conversation lives at /c/<uuid> and SPA
+                // navigations update it synchronously.
+                const urlId = findConversationIdInUrl(window.location.href);
+                if (urlId) return urlId;
 
-                // 1. Direct attribute check on tagged elements
-                const tagged = document.querySelectorAll('[data-cascade-id], [data-conversation-id], [data-chat-id], [data-session-id], [data-thread-id]');
-                for (const el of tagged) {
-                    const val = el.getAttribute('data-conversation-id') ||
-                                el.getAttribute('data-chat-id') ||
-                                el.getAttribute('data-session-id') ||
-                                el.getAttribute('data-thread-id') ||
-                                el.getAttribute('data-cascade-id');
-                    if (val && uuidRegex.test(val)) {
-                        return val.match(uuidRegex)[0];
+                // 2. Explicitly selected sidebar row. Antigravity marks the
+                // open conversation with data-selected="true" on
+                // [data-testid="conversation-row-sidebar"] carrying
+                // data-cascade-id. NOTE: never return the first
+                // [data-cascade-id] in DOM order — the list holds many rows
+                // and the first one is usually NOT the active conversation.
+                const selectedRow = document.querySelector(
+                    '[data-testid="conversation-row-sidebar"][data-selected="true"]'
+                );
+                if (selectedRow) {
+                    const cid = selectedRow.getAttribute('data-cascade-id')
+                        || selectedRow.getAttribute('data-conversation-id');
+                    if (cid && /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i.test(cid)) {
+                        return cid.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i)[0];
+                    }
+                    const rowLink = selectedRow.querySelector('a[href*="/c/"]');
+                    if (rowLink) {
+                        const linkId = findConversationIdInUrl(rowLink.getAttribute('href') || rowLink.href || '');
+                        if (linkId) return linkId;
                     }
                 }
 
-                // 2. Links with conversation:// or brain/ or chat
-                const links = document.querySelectorAll('a[href*="conversation"], a[href*="brain"], a[href*="chat"]');
-                for (const a of links) {
-                    const match = (a.href || '').match(uuidRegex);
-                    if (match) return match[0];
-                }
-
-                // 3. Scan React fibers on container elements
-                const selectors = [
-                    '.overflow-y-auto',
-                    '[class*="cascade"]',
-                    '[class*="conversation"]',
-                    '[class*="chat"]',
-                    '[class*="jetski"]',
-                    '.tab.active',
-                    '[role="tab"][aria-selected="true"]',
-                    'textarea',
-                    '[contenteditable="true"]',
-                    'main',
-                    '#workbench\\.parts\\.editor',
-                    '.editor-instance'
-                ];
-                const elements = document.querySelectorAll(selectors.join(', '));
-                for (const el of elements) {
-                    const fiber = getReactFiber(el);
-                    if (!fiber) continue;
-                    let curr = fiber;
-                    let depth = 0;
-                    while (curr && depth < 30) {
-                        const props = curr.memoizedProps;
-                        if (props) {
-                            const cid = props.conversationId || (props.conversation && props.conversation.id) ||
-                                        props.chatId || (props.chat && props.chat.id) ||
-                                        props.activeConversationId || props.activeChatId ||
-                                        props.sessionId || (props.session && props.session.id) ||
-                                        props.cascadeId || props.threadId;
-                            if (cid && typeof cid === 'string' && uuidRegex.test(cid)) {
-                                return cid.match(uuidRegex)[0];
-                            }
-                        }
-                        const stateProps = curr.memoizedState;
-                        if (stateProps) {
-                            const cid = stateProps.conversationId || (stateProps.conversation && stateProps.conversation.id) ||
-                                        stateProps.activeConversationId || stateProps.sessionId;
-                            if (cid && typeof cid === 'string' && uuidRegex.test(cid)) {
-                                return cid.match(uuidRegex)[0];
-                            }
-                        }
-                        curr = curr.return;
-                        depth++;
-                    }
+                // 3. Links pointing at the active conversation (scoped to the
+                // selected row or breadcrumb — not the whole document, which
+                // contains one link per conversation in the list).
+                const crumbLink = document.querySelector('[data-testid="breadcrumb-segment"] a[href*="/c/"]');
+                if (crumbLink) {
+                    const linkId = findConversationIdInUrl(crumbLink.getAttribute('href') || crumbLink.href || '');
+                    if (linkId) return linkId;
                 }
             } catch (_) {}
             return null;
@@ -512,65 +483,59 @@
         }
 
         // Active Chat Identification
+        // Priority: URL /c/<uuid> > selected sidebar row > breadcrumb >
+        // document.title > first user message. The URL and the selected row
+        // are explicit framework markers; everything below is a fallback for
+        // surfaces (e.g. IDE webviews) where the URL carries no conversation.
         function detectActiveChat() {
             let title = '';
             let id = '';
 
-            // 1. Detect conversation UUID
+            // 1. Conversation UUID from URL or selected sidebar row.
             id = findActiveConversationId() || '';
 
-            // 2. Detect from URL (if available)
-            if (!id) {
-                try {
-                    const href = window.location.href;
-                    const match = href.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i);
-                    if (match) id = match[0];
-                } catch (_) {}
-            }
-
-            // 3. Extract first user prompt as reliable chat fingerprint
+            // 2. Extract first user prompt as chat fingerprint (verification
+            // + cache key fallback, never the primary identity).
             const firstPrompt = extractFirstPromptFromDom();
 
-            // 4. Detect from active sidebar item (scoped to navigation/sidebar)
+            // 3. Title from breadcrumb segments (last = conversation).
+            // Verified live: span[data-testid="breadcrumb-segment"] holds the
+            // conversation title shown next to the workspace name.
             try {
-                const sidebarContainers = document.querySelectorAll(
-                    'nav, aside, [role="navigation"], [data-testid*="sidebar"], [data-testid*="conversation-list"], [class*="sidebar"], [class*="history"]'
-                );
-
-                for (const nav of sidebarContainers) {
-                    const activeItem = nav.querySelector(
-                        '[aria-selected="true"], [data-state="active"], [data-state="selected"], [data-active="true"], [class*="selected"], .active'
-                    );
-                    if (activeItem) {
-                        if (!id) {
-                            const dataId = activeItem.getAttribute('data-conversation-id') ||
-                                           activeItem.getAttribute('data-cascade-id') ||
-                                           activeItem.getAttribute('data-id') ||
-                                           activeItem.getAttribute('data-chat-id') ||
-                                           activeItem.getAttribute('data-session-id');
-                            if (dataId && /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i.test(dataId)) {
-                                id = dataId;
-                            }
-                        }
-
-                        const link = activeItem.matches('a') ? activeItem : activeItem.querySelector('a');
-                        if (link && link.href && !id) {
-                            const linkMatch = link.href.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i);
-                            if (linkMatch) id = linkMatch[0];
-                        }
-
-                        const titleEl = activeItem.querySelector('.title, [class*="title"], h3, h4, span') || activeItem;
-                        let text = titleEl.textContent || '';
-                        text = text.replace(/\s*\d+[mhd]\s*$/, '').trim();
-                        if (text && text.length > 1 && text.toLowerCase() !== 'conversations' && text.toLowerCase() !== 'chats') {
-                            title = text;
-                        }
-                        break;
-                    }
+                const segments = [...document.querySelectorAll('[data-testid="breadcrumb-segment"]')]
+                    .map(s => (s.textContent || '').trim())
+                    .filter(Boolean);
+                if (segments.length > 0) {
+                    const last = segments[segments.length - 1];
+                    if (last.length > 1) title = last;
                 }
             } catch (_) {}
 
-            // 5. Detect from active editor tab
+            // 4. Title from selected sidebar row (authoritative list label).
+            if (!title) {
+                try {
+                    const selRow = document.querySelector(
+                        '[data-testid="conversation-row-sidebar"][data-selected="true"]'
+                    );
+                    const labelEl = selRow?.querySelector('span.truncate') || selRow;
+                    let text = (labelEl?.textContent || '').replace(/\s*\d+[mhd]\s*$/, '').trim();
+                    if (text && text.length > 1 && !/^(conversations|chats)$/i.test(text)) {
+                        title = text;
+                    }
+                } catch (_) {}
+            }
+
+            // 5. Title from document.title ("<Conversation> - ... - Antigravity").
+            if (!title) {
+                try {
+                    const docTitle = (document.title || '').split(' - ')[0].trim();
+                    if (docTitle && docTitle.length > 1 && !/^(antigravity|new tab)$/i.test(docTitle)) {
+                        title = docTitle;
+                    }
+                } catch (_) {}
+            }
+
+            // 6. Active editor tab (IDE surfaces).
             if (!title) {
                 const activeTab = document.querySelector('.tab.active .label-name, [role="tab"][aria-selected="true"]');
                 if (activeTab) {
@@ -581,7 +546,7 @@
                 }
             }
 
-            // 6. Detect from breadcrumb or header title
+            // 7. Header title element (IDE agent panel).
             if (!title) {
                 const headerEl =
                     document.querySelector('[data-testid="conversation-title"]') ||
@@ -612,7 +577,11 @@
                 title = isExplicitNewConvo ? 'New Conversation' : (hasMessages ? 'Active Conversation' : 'New Conversation');
             }
 
-            // Unique key ensures every different conversation triggers chat change detection
+            // Stable per-conversation key. id:<uuid> is authoritative; the
+            // title/prompt fallbacks only fire on surfaces without URL ids.
+            // There is deliberately NO generic constant fallback: a constant
+            // key never changes, so switching conversations would never
+            // trigger a refresh and the pill would freeze on stale numbers.
             let key = '';
             if (id) {
                 key = 'id:' + id;
@@ -623,7 +592,11 @@
             } else if (isExplicitNewConvo) {
                 key = 'new-chat';
             } else {
-                key = 'active-dom-chat';
+                try {
+                    key = 'url:' + (window.location.href || document.title || 'unknown');
+                } catch (_) {
+                    key = 'url:unknown';
+                }
             }
 
             return {
@@ -650,7 +623,14 @@
                     }
                     if (activeChat.id) {
                         state.currentChatId = activeChat.id;
+                    } else if (activeChat.isNewConversation) {
+                        state.currentChatId = '';
                     }
+
+                    // Prefer the id-keyed cache entry: the key may be a
+                    // title/prompt fallback while the id is known.
+                    const cached = state.chatMetricsCache[activeChat.key]
+                        || (activeChat.id && state.chatMetricsCache['id:' + activeChat.id]);
 
                     if (activeChat.isNewConversation) {
                         state.sessionStats = {
@@ -672,8 +652,7 @@
                         state.hasTranscriptData = true;
                         state.currentChatTitle = 'New Conversation';
                         state.currentChatId = '';
-                    } else if (state.chatMetricsCache[activeChat.key] || (activeChat.id && state.chatMetricsCache['id:' + activeChat.id])) {
-                        const cached = state.chatMetricsCache[activeChat.key] || state.chatMetricsCache['id:' + activeChat.id];
+                    } else if (cached) {
                         state.sessionStats = { ...cached.sessionStats };
                         if (cached.latestRoundStats) state.latestRoundStats = { ...cached.latestRoundStats };
                         if (Array.isArray(cached.rounds)) state.rounds = cached.rounds;
@@ -681,8 +660,31 @@
                         if (cached.title) state.currentChatTitle = cached.title;
                         if (cached.id) state.currentChatId = cached.id;
                         requestTranscriptUpdate(activeChat);
+                        updateUI();
                     } else {
+                        // Unknown conversation: reset synchronously so the
+                        // pill never shows the previous chat's numbers while
+                        // the transcript lookup is in flight. The DOM scrape
+                        // below fills a rough estimate; the transcript
+                        // update overwrites it with ground truth.
+                        state.sessionStats = {
+                            totalTokens: 0,
+                            totalRounds: 0,
+                            totalSteps: 0,
+                            totalTools: 0
+                        };
+                        state.latestRoundStats = {
+                            durationMs: 0,
+                            inputTokens: 0,
+                            outputTokens: 0,
+                            thinkingTokens: 0,
+                            totalRoundTokens: 0,
+                            toolCount: 0,
+                            toolsList: []
+                        };
+                        state.rounds = [];
                         state.hasTranscriptData = false;
+                        updateUI();
                         requestTranscriptUpdate(activeChat);
                     }
                 }
@@ -736,6 +738,18 @@
                             id: state.currentChatId
                         };
                     }
+
+                    // Throttled re-request: an unwatched conversation (no
+                    // transcript on disk yet) gets no fs.watch pushes, so
+                    // poll the main process at most every 5s until ground
+                    // truth arrives (e.g. first turn of a new chat finishes).
+                    try {
+                        const now = Date.now();
+                        if (!state.lastTranscriptRequest || now - state.lastTranscriptRequest > 5000) {
+                            state.lastTranscriptRequest = now;
+                            requestTranscriptUpdate(activeChat);
+                        }
+                    } catch (_) {}
                 }
 
                 // Detect generation status strictly via generation-specific indicators
@@ -760,7 +774,6 @@
                     requestTranscriptUpdate(activeChat);
                 }
 
-                attachMessageBadges();
                 updateUI();
             } catch (err) {
                 console.error('[Antigravity Metrics] DOM scan error:', err);
@@ -776,7 +789,6 @@
                     return;
                 }
                 const elapsed = Math.max(0, Date.now() - state.msgStartTime);
-                const durText = '⚡ ' + formatDuration(elapsed);
 
                 // Update live output tokens from streaming assistant reply
                 const assistantReplies = document.querySelectorAll(
@@ -791,15 +803,6 @@
                     state.latestLiveTokens = estimateTokens(latestReply.textContent || '');
                     state.latestRoundStats.outputTokens = state.latestLiveTokens;
                     state.latestRoundStats.totalRoundTokens = (state.latestRoundStats.inputTokens || 0) + state.latestLiveTokens + (state.latestRoundStats.thinkingTokens || 0);
-                }
-
-                const badges = document.querySelectorAll('.agm-msg-badge');
-                if (badges.length > 0) {
-                    const latestBadge = badges[badges.length - 1];
-                    const durSpan = latestBadge.querySelector('.agm-badge-dur');
-                    if (durSpan && durSpan.textContent !== durText) {
-                        durSpan.textContent = durText;
-                    }
                 }
 
                 const roundDurEl = document.getElementById('agm-dash-round-duration');
@@ -823,78 +826,26 @@
             updateButtonText();
         }
 
-        // Attach per-message metrics badge to assistant replies
-        function attachMessageBadges() {
-            if (!state.config.showMsgBadges) return;
-            const assistantReplies = document.querySelectorAll(
-                '[aria-label="Agent response"], [data-testid="conversation-view"] .leading-relaxed.select-text, [data-testid="chat-message"]:not([data-testid="user-input-step"])'
-            );
-
-            const replyList = assistantReplies.length > 0
-                ? Array.from(assistantReplies)
-                : Array.from(document.querySelectorAll('.prose, [data-testid="conversation-view"] .leading-relaxed')).filter(el => !el.closest('[data-testid="chat-message"], [data-testid="user-input-step"], [aria-label="User message"]'));
-
-            const total = replyList.length;
-            replyList.forEach((replyEl, idx) => {
-                let badge = replyEl.querySelector(':scope > .agm-msg-badge') || replyEl.querySelector('.agm-msg-badge');
-                const isLatest = idx === total - 1;
-                const tokens = estimateTokens(replyEl.textContent || '');
-                if (tokens < 10) return;
-
-                // Determine duration for this message
-                let durationText = '';
-                if (isLatest && state.isGenerating) {
-                    const elapsed = Math.max(0, Date.now() - state.msgStartTime);
-                    durationText = '⚡ ' + formatDuration(elapsed);
-                } else if (isLatest && state.lastMsgDurationMs > 0) {
-                    durationText = '⏱️ ' + formatDuration(state.lastMsgDurationMs);
-                } else if (state.rounds && state.rounds[idx] && state.rounds[idx].durationMs > 0) {
-                    durationText = '⏱️ ' + formatDuration(state.rounds[idx].durationMs);
-                } else if (state.latestRoundStats.durationMs > 0 && isLatest) {
-                    durationText = '⏱️ ' + formatDuration(state.latestRoundStats.durationMs);
-                }
-
-                if (badge) {
-                    // Update existing badge only if changed
-                    const durSpan = badge.querySelector('.agm-badge-dur');
-                    if (durSpan) {
-                        if (durSpan.textContent !== durationText) {
-                            durSpan.textContent = durationText;
-                        }
-                    } else if (durationText) {
-                        const dot = el('span', 'opacity:0.35;', '·');
-                        const newDur = el('span', 'opacity:0.85;', durationText, { className: 'agm-badge-dur' });
-                        badge.appendChild(dot);
-                        badge.appendChild(newDur);
-                    }
-                    return;
-                }
-
-                const children = [
-                    el('span', 'opacity:0.85;', '🪙 ' + formatTokens(tokens) + ' tok')
-                ];
-
-                if (durationText) {
-                    children.push(el('span', 'opacity:0.35;', '·'));
-                    children.push(el('span', 'opacity:0.85;', durationText, { className: 'agm-badge-dur' }));
-                }
-
-                badge = el('div', null, children, { className: 'agm-msg-badge' });
-                replyEl.appendChild(badge);
-            });
-        }
-
         // Find the native actions container in Antigravity header (Supports Standalone App & Antigravity IDE)
+        // The topbar actions cluster holds More actions + Open IDE + RTL.
+        // Verified live: [data-testid="titlebar-more-actions"] and
+        // [data-testid="open-editor-empty"] share the same parent DIV, and the
+        // RTL patch appends #rtl-topbar-wrapper to that same parent.
+        // NEVER use the New Conversation button: it lives in the sidebar
+        // section header and previously mis-mounted the pill down there.
         function getHeaderActionsContainer() {
+            const moreActions = document.querySelector('[data-testid="titlebar-more-actions"]')?.parentElement;
+            if (moreActions) return moreActions;
+            const openEditor = document.querySelector('[data-testid="open-editor-empty"]')?.parentElement
+                || document.querySelector('[data-testid="install-editor"]')?.parentElement;
+            if (openEditor) return openEditor;
+            const rtlParent = document.getElementById('rtl-topbar-wrapper')?.parentElement;
+            if (rtlParent) return rtlParent;
             return (
-                document.querySelector('button[aria-label="New Conversation"]')?.parentElement ||
                 document.querySelector('button[aria-label="More actions"]')?.parentElement ||
                 document.querySelector('button[aria-label="Close panel"]')?.parentElement ||
                 document.querySelector('.composite.title .title-actions') ||
                 document.querySelector('.pane-header .actions') ||
-                document.querySelector('[data-testid="install-editor"]')?.parentElement ||
-                document.querySelector('[data-testid="titlebar-more-actions"]')?.parentElement ||
-                document.getElementById('rtl-topbar-wrapper')?.parentElement ||
                 document.querySelector('[data-testid="chat-header"] > div:last-child') ||
                 document.querySelector('header > div:last-child') ||
                 document.querySelector('.part.titlebar .titlebar-right') ||
@@ -946,19 +897,15 @@
                 });
             }
 
-            // Mount button in topbar actions cluster
+            // Mount button in topbar actions cluster, next to Open IDE / RTL.
+            // Self-healing: if a previous version mounted the pill in the
+            // sidebar, this moves it back to the header on the next scan.
             const actionsCluster = getHeaderActionsContainer();
             if (actionsCluster && btn.parentElement !== actionsCluster) {
                 const rtlWrapper = document.getElementById('rtl-topbar-wrapper');
-                const installBtn = document.querySelector('[data-testid="install-editor"]');
-                const newChatBtn = document.querySelector('button[aria-label="New Conversation"]');
 
-                if (newChatBtn && newChatBtn.parentElement === actionsCluster) {
-                    actionsCluster.insertBefore(btn, newChatBtn);
-                } else if (rtlWrapper && rtlWrapper.parentElement === actionsCluster) {
+                if (rtlWrapper && rtlWrapper.parentElement === actionsCluster) {
                     actionsCluster.insertBefore(btn, rtlWrapper);
-                } else if (installBtn && installBtn.parentElement === actionsCluster) {
-                    actionsCluster.insertBefore(btn, installBtn);
                 } else {
                     actionsCluster.appendChild(btn);
                 }
@@ -966,14 +913,16 @@
                 btn.style.top = '';
                 btn.style.right = '';
                 btn.style.zIndex = '';
-            } else if (!actionsCluster && !btn.parentElement) {
-                // If in IDE and statusbar exists, avoid floating button over code
-                const isIde = Boolean(document.querySelector('.part.statusbar'));
-                if (!isIde) {
-                    btn.style.cssText += 'position:fixed;top:8px;right:24px;z-index:9999;';
-                    document.body.appendChild(btn);
-                }
+            } else if (!actionsCluster && btn.parentElement && btn.parentElement !== document.body) {
+                // Stuck in a wrong container (e.g. sidebar from an older
+                // version) with no valid cluster found yet: detach so the
+                // next scan can re-mount it correctly instead of showing
+                // stale numbers in the wrong place.
+                btn.remove();
             }
+            // NOTE: no fixed-position body fallback. A floating pill overlaps
+            // content and hides the misplacement instead of fixing it; when
+            // the cluster is not mounted yet we simply wait for the next scan.
 
             return btn;
         }
@@ -1124,15 +1073,7 @@
 
             const settingsCard = el('div', 'margin-top:10px;', [
                 el('div', 'font-weight:600;font-size:11.5px;margin-bottom:6px;', 'Model Context Limit'),
-                selectModel,
-                el('div', 'display:flex;justify-content:space-between;align-items:center;margin-top:8px;', [
-                    el('span', 'font-size:11px;', 'Show message token badges'),
-                    el('input', null, null, {
-                        type: 'checkbox',
-                        id: 'agm-toggle-badges',
-                        checked: state.config.showMsgBadges !== false
-                    })
-                ])
+                selectModel
             ], { className: 'agm-card' });
             panel.appendChild(settingsCard);
 
@@ -1150,12 +1091,6 @@
             selectModel.value = String(state.config.modelLimit || 256000);
             selectModel.addEventListener('change', (e) => {
                 state.config.modelLimit = parseInt(e.target.value, 10) || 256000;
-                saveConfig();
-                updateUI();
-            });
-            const badgeCheckbox = panel.querySelector('#agm-toggle-badges');
-            badgeCheckbox.addEventListener('change', (e) => {
-                state.config.showMsgBadges = e.target.checked;
                 saveConfig();
                 updateUI();
             });
@@ -1402,8 +1337,13 @@
                 });
             }
 
-            if (statusBar.firstChild !== item) {
-                statusBar.prepend(item);
+            if (item.parentElement !== statusBar) {
+                const rtlBtn = document.getElementById('antigravity-rtl-statusbar-btn');
+                if (rtlBtn && rtlBtn.parentElement === statusBar) {
+                    statusBar.insertBefore(item, rtlBtn);
+                } else {
+                    statusBar.prepend(item);
+                }
             }
         }
 
@@ -1428,10 +1368,16 @@
             }
         });
 
-        // Clean up legacy element if present
+        // Clean up legacy elements from older versions (sidebar pill era,
+        // per-message badges era) if present
         function cleanLegacyPill() {
             const oldPill = document.getElementById('antigravity-metrics-pill');
             if (oldPill) oldPill.remove();
+            // Per-message end badges were removed as a feature (wrong
+            // numbers, visual noise): strip any left in the DOM.
+            try {
+                document.querySelectorAll('.agm-msg-badge').forEach(b => b.remove());
+            } catch (_) {}
         }
 
         let updateDebounceTimer = null;
@@ -1466,24 +1412,62 @@
             requestTranscriptUpdate();
             updateUI();
 
+            // Instant conversation-switch detection: Antigravity is an SPA —
+            // opening another chat rewrites the URL (/c/<uuid>) via
+            // history.pushState without a reload and sometimes with barely
+            // any DOM churn, so the MutationObserver + poll below can lag by
+            // seconds. Hooking navigation fires a scan immediately.
+            try {
+                let lastHref = window.location.href;
+                const onUrlChange = () => {
+                    const now = window.location.href;
+                    if (now !== lastHref) {
+                        lastHref = now;
+                        runScanAndSync();
+                        requestTranscriptUpdate();
+                    }
+                };
+                const origPush = history.pushState;
+                history.pushState = function(...args) {
+                    const r = origPush.apply(this, args);
+                    onUrlChange();
+                    return r;
+                };
+                const origReplace = history.replaceState;
+                history.replaceState = function(...args) {
+                    const r = origReplace.apply(this, args);
+                    onUrlChange();
+                    return r;
+                };
+                window.addEventListener('popstate', onUrlChange);
+                window.addEventListener('hashchange', onUrlChange);
+                setInterval(() => {
+                    try {
+                        if (window.location.href !== lastHref) {
+                            lastHref = window.location.href;
+                            runScanAndSync();
+                            requestTranscriptUpdate();
+                        }
+                    } catch (_) {}
+                }, 750);
+            } catch (_) {}
+
             const observer = new MutationObserver((mutations) => {
                 if (isInternalMutation) return;
 
                 // Check if any mutation is external (not our own widgets)
                 const hasExternal = mutations.some(m => {
-                    if (m.target && m.target.closest && m.target.closest('#agm-topbar-btn, #antigravity-metrics-panel, #antigravity-metrics-statusbar-btn, .agm-msg-badge')) {
+                    if (m.target && m.target.closest && m.target.closest('#agm-topbar-btn, #antigravity-metrics-panel, #antigravity-metrics-statusbar-btn')) {
                         return false;
                     }
                     for (let i = 0; i < m.addedNodes.length; i++) {
                         const node = m.addedNodes[i];
                         if (node.id && (node.id.startsWith('agm-') || node.id.startsWith('antigravity-metrics-'))) continue;
-                        if (node.classList && node.classList.contains('agm-msg-badge')) continue;
                         return true;
                     }
                     for (let i = 0; i < m.removedNodes.length; i++) {
                         const node = m.removedNodes[i];
                         if (node.id && (node.id.startsWith('agm-') || node.id.startsWith('antigravity-metrics-'))) continue;
-                        if (node.classList && node.classList.contains('agm-msg-badge')) continue;
                         return true;
                     }
                     return false;
