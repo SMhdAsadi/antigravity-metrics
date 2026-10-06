@@ -32,10 +32,12 @@ It gives you full visibility into context consumption, per-chat token tracking, 
   - Calibrated default for **Gemini 3.8 Flash (Antigravity 256k checkpointer limit)**, with options for **Gemini Pro Extended (2M)**, **Claude 3.7 Sonnet (200k)**, **GPT-4o (128k)**, and custom limits.
   - Exact token count and compaction recommendations when approaching the Dumb Zone.
 
-- ⏱️ **Per-Turn Execution Telemetry** (in the dashboard):
-  - Latest turn duration, turn token delta, tool-call count and speed.
-  - Live duration counter while the agent is actively generating.
-  - No disruptive global timers when browsing finished chats.
+- ⏱️ **Per-Turn Duration** (inline, on every message):
+  - Each finished turn gets its wall-clock duration printed at the left of that turn's own action row — the same row that holds copy / good / bad.
+  - Numbers come from the transcript, so every turn keeps its own history instead of only the latest one.
+  - Nothing is rendered while a turn is generating — the native toolbar doesn't exist yet, so the UI stays untouched until the turn lands.
+  - **Honest, never invented:** the transcript's step timestamps are second-granular and a turn's steps often share a single second, which collapses the delta to `0`. When that happens the newest turn falls back to the stopwatch this patch kept while it was actually running; if even that is unavailable (the app restarted since) the duration is simply **omitted** rather than shown as a misleading `0.0s`.
+  - Turn token counts and speed were removed: both derive from the same unreliable delta, so they were reported as noise or `—` instead of a number.
 
 - 🛠️ **Dedicated Topbar Header Button**:
   - Unified button placed seamlessly at the top header alongside native actions (`Open IDE`, `Update Available`, `RTL`).
@@ -59,31 +61,44 @@ Clicking the button toggles the **Flyout Dashboard** (`⌥M` / `Alt+M`).
 ### 2. Flyout Analytics Dashboard
 ```
 ╭──────────────────────────────────────────────────╮
-│ 📊 Antigravity Metrics                   ● LIVE  │
-│ Real-time tokens, context & execution telemetry  │
+│ 📊 Antigravity Metrics                          ● IDLE │
+│ Real-time tokens, context & per-chat telemetry        │
 ├──────────────────────────────────────────────────┤
-│ Context Window:                          4.8%    │
-│ [████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░] │
-│ 48.2k used                       1.0M limit      │
-│ ~951,750 tokens remaining                        │
+│ 💬 Android Wireless Connection Scrip…    Chat       │
+│    ID: 74967d6d • 6 rounds                         Scope │
 ├──────────────────────────────────────────────────┤
-│ Latest Round Activity                  Round #5  │
-│ ┌──────────────────────┬───────────────────────┐ │
-│ │ ⏱️ Duration: 14.2s   │ 🪙 Round: +5.4k tok   │ │
-│ ├──────────────────────┼───────────────────────┤ │
-│ │ 🛠️ Tools: 3 calls    │ ⚡ Speed: 78 tok/s    │ │
-│ └──────────────────────┴───────────────────────┘ │
+│ Context Window   🟢 Smart Zone (Optimal)      25.8% │
+│ [████████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░]   │
+│ 65.9k used                       256.0k limit      │
+│ ~190.1k tokens remaining                            │
 ├──────────────────────────────────────────────────┤
-│ Model Preset: [ Gemini Flash (1,000,000)   ▼ ]   │
+│ Model Context Limit                                │
+│ [ Gemini 3.8 Flash - Antigravity (256,000 token… ▼] │
 ├──────────────────────────────────────────────────┤
-│ Shortcut: ⌥M / Alt+M             [Refresh Data] │
+│ Shortcut: ⌥M / Alt+M             [Refresh Data]     │
 ╰──────────────────────────────────────────────────╯
 ```
 
-### 3. Per-Turn Telemetry Lives In The Dashboard
-Turn duration, turn tokens, tool calls and speed are shown in the
-flyout dashboard's "Latest Turn Telemetry" card — not inline under
-messages, keeping the chat surface clean.
+### 3. Per-Turn Duration, Inline On Every Message
+Turn duration rides Antigravity's own message toolbar instead of a
+dashboard card, so each turn keeps its own number where you can read it
+in context:
+
+```
+                                          3m 50s          ⧉ 👍 👎
+                                          ↑               └─ copy / good / bad
+                                          └── this turn's wall-clock duration
+```
+
+- It is plain muted text in the row's left slot, where the native
+  timestamp already appears on hover — quiet enough to ignore, legible
+  enough to scan.
+- A turn with an unknowable duration shows **no text at all** rather than
+  `0.0s`, so the row never states something untrue.
+- Nothing else is added to the row. An earlier revision also showed turn
+  tokens and speed behind a ghost icon button; both were dropped because
+  they are computed from the same second-granular transcript delta and
+  were therefore unreliable.
 
 ---
 

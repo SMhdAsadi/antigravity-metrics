@@ -32,6 +32,12 @@
             isGenerating: false,
             msgStartTime: 0,
             lastMsgDurationMs: 0,
+            // Wall-clock duration of the last turn this client watched run,
+            // plus the conversation it belongs to. Used only as a fallback for
+            // the newest turn when the transcript's second-granular timestamps
+            // cannot resolve a duration (see resolveTurnDuration).
+            lastMeasuredDurationMs: 0,
+            lastMeasuredChatKey: '',
             latestLiveTokens: 0,
             latestRoundStats: {
                 durationMs: 0,
@@ -246,6 +252,7 @@
             }
 
             updateUI();
+            syncTurnTelemetry();
         };
 
         // DOM Element helper
@@ -355,26 +362,23 @@
                     border-radius: 8px;
                     padding: 8px 10px;
                 }
-                .agm-telemetry-box {
-                    background: #18181b !important;
-                    border: 1px solid rgba(255, 255, 255, 0.08) !important;
-                    border-radius: 6px;
-                    padding: 6px 8px;
-                }
-                .agm-telemetry-label {
-                    font-size: 10px !important;
-                    font-weight: 500 !important;
-                    color: #cbd5e1 !important;
+                /* Per-turn telemetry, mounted inside the native message
+                   toolbar so it reads as part of Antigravity's own row. */
+                .agm-turn-dur {
                     display: flex !important;
                     align-items: center !important;
-                    gap: 3px !important;
-                }
-                .agm-telemetry-value {
-                    font-weight: 600 !important;
-                    font-size: 12.5px !important;
-                    margin-top: 2px !important;
-                    color: #f8fafc !important;
+                    flex-shrink: 0 !important;
+                    height: 20px !important;
+                    font-size: 11px !important;
+                    line-height: 1 !important;
+                    font-weight: 400 !important;
                     letter-spacing: 0.1px !important;
+                    white-space: nowrap !important;
+                    color: var(--muted-foreground, #a1a1aa) !important;
+                    opacity: 0.7;
+                    font-variant-numeric: tabular-nums;
+                    user-select: none;
+                    pointer-events: none;
                 }
                 .agm-select {
                     background: var(--vscode-input-background, var(--muted, #27272a));
@@ -618,6 +622,11 @@
 
                 if (chatKeyChanged) {
                     state.currentChatKey = activeChat.key;
+                    // The measured stopwatch belongs to the conversation we are
+                    // leaving; keeping it would let its duration leak onto this
+                    // one's newest turn.
+                    state.lastMeasuredDurationMs = 0;
+                    state.lastMeasuredChatKey = '';
                     if (activeChat.title && activeChat.title !== 'Active Conversation') {
                         state.currentChatTitle = activeChat.title;
                     }
@@ -770,6 +779,11 @@
                     state.isGenerating = false;
                     state.lastMsgDurationMs = Date.now() - state.msgStartTime;
                     state.latestRoundStats.durationMs = state.lastMsgDurationMs;
+                    // Remember it against this conversation so the newest turn
+                    // still gets a real duration when the transcript's
+                    // second-granular timestamps cannot resolve one.
+                    state.lastMeasuredDurationMs = state.lastMsgDurationMs;
+                    state.lastMeasuredChatKey = state.currentChatKey;
                     stopLiveTimer();
                     requestTranscriptUpdate(activeChat);
                 }
@@ -788,7 +802,6 @@
                     stopLiveTimer();
                     return;
                 }
-                const elapsed = Math.max(0, Date.now() - state.msgStartTime);
 
                 // Update live output tokens from streaming assistant reply
                 const assistantReplies = document.querySelectorAll(
@@ -805,14 +818,6 @@
                     state.latestRoundStats.totalRoundTokens = (state.latestRoundStats.inputTokens || 0) + state.latestLiveTokens + (state.latestRoundStats.thinkingTokens || 0);
                 }
 
-                const roundDurEl = document.getElementById('agm-dash-round-duration');
-                if (roundDurEl) {
-                    const formatted = formatDuration(elapsed);
-                    if (roundDurEl.textContent !== formatted) {
-                        roundDurEl.textContent = formatted;
-                    }
-                }
-
                 updateButtonText();
             }, 250);
         }
@@ -824,6 +829,112 @@
             }
             state.latestLiveTokens = 0;
             updateButtonText();
+        }
+
+        // ---------------------------------------------------------------------
+        // Per-turn duration, mounted inside Antigravity's own message toolbar.
+        //
+        // [data-testid="cascade-system-message-toolbar"] is the row holding the
+        // copy / good / bad buttons. Verified against the served bundle: it is
+        // rendered by the turn container as Usb({steps, showThumbsUpDown,
+        // isLatest}) and gated on the turn being IDLE, so there is exactly one
+        // toolbar per finished turn and none for the turn currently generating.
+        //
+        // The duration text goes in the row's left slot, where the native hover
+        // timestamp already lives, so it reads as part of the row rather than as
+        // a widget dropped into the chat.
+        //
+        // Duration is the ONLY metric shown. The transcript's step timestamps
+        // are second-granular, and a turn's steps frequently share one second
+        // (verified on real transcripts: a 3-step turn whose steps all carry the
+        // same created_at), which makes the per-round delta collapse to 0. That
+        // also poisons anything derived from it — turn tokens and speed were
+        // dropped for that reason rather than shown as noise or "—".
+        //
+        // So the duration is either real or absent: when the transcript cannot
+        // tell us, we fall back to the stopwatch this client kept while the turn
+        // was actually running, and if even that is unavailable (app restarted
+        // since) we render nothing at all rather than a misleading "0.0s".
+        // ---------------------------------------------------------------------
+
+        function resolveTurnDuration(round, isLastRound) {
+            const fromTranscript = Math.max(0, (round && round.durationMs) || 0);
+            if (fromTranscript > 0) return fromTranscript;
+            // Only the newest turn can be one we watched run, and only while we
+            // are still in the conversation it happened in.
+            if (isLastRound && state.lastMeasuredChatKey && state.lastMeasuredChatKey === state.currentChatKey) {
+                return Math.max(0, state.lastMeasuredDurationMs || 0);
+            }
+            return 0;
+        }
+
+        let turnTelemetrySignature = '';
+        function syncTurnTelemetry() {
+            let bars = [];
+            try {
+                bars = Array.from(document.querySelectorAll('[data-testid="cascade-system-message-toolbar"]'));
+            } catch (_) {
+                return;
+            }
+
+            const rounds = (state.hasTranscriptData && Array.isArray(state.rounds)) ? state.rounds : [];
+
+            // One toolbar per finished turn, so index i is turn i. The only turn
+            // that can lack a toolbar is the one generating right now, and that
+            // is always the last one — so head alignment stays correct while a
+            // turn runs. When the transcript knows FEWER turns than the DOM shows
+            // (leading history cleared) align from the tail instead, keeping the
+            // newest rows on real numbers rather than guessing.
+            const offset = rounds.length >= bars.length ? 0 : rounds.length - bars.length;
+
+            // React owns these rows and drops foreign children when it re-renders
+            // (e.g. after Copy is pressed), so the count of rows still carrying
+            // our node is part of the signature: losing one invalidates it and
+            // forces a re-insert instead of a no-op.
+            let mounted = 0;
+            for (let i = 0; i < bars.length; i++) {
+                if (bars[i].querySelector('.agm-turn-dur')) mounted++;
+            }
+
+            const signature = [bars.length, rounds.length, offset, mounted,
+                state.lastMeasuredDurationMs, state.lastMeasuredChatKey].join('|') + '|' + rounds
+                .map(r => r.durationMs || 0)
+                .join(',');
+            if (signature === turnTelemetrySignature) return;
+            turnTelemetrySignature = signature;
+
+            bars.forEach((bar, i) => {
+                const roundIndex = i + offset;
+                const round = rounds[roundIndex];
+                // Guard the index: with no rounds at all (conversation switch,
+                // transcript not found) roundIndex is negative and would still
+                // compare equal to rounds.length - 1, wrongly making some row
+                // "the last turn" and letting the stopwatch backfill it.
+                const isLastRound = roundIndex >= 0 && roundIndex === rounds.length - 1;
+                const durMs = resolveTurnDuration(round, isLastRound);
+                const existing = bar.querySelector('.agm-turn-dur');
+
+                // Unknown duration -> show nothing. A row that quietly reads
+                // "0.0s" is worse than no row at all.
+                if (durMs <= 0) {
+                    if (existing) existing.remove();
+                    return;
+                }
+
+                const durText = formatDuration(durMs);
+                if (existing) {
+                    if (existing.textContent !== durText) existing.textContent = durText;
+                    return;
+                }
+
+                const durEl = el('span', null, durText, { className: 'agm-turn-dur' });
+                const row = bar.firstElementChild;
+                if (row) {
+                    row.insertBefore(durEl, row.firstElementChild);
+                } else {
+                    bar.insertBefore(durEl, bar.firstChild);
+                }
+            });
         }
 
         // Find the native actions container in Antigravity header (Supports Standalone App & Antigravity IDE)
@@ -1034,34 +1145,7 @@
             ], { className: 'agm-card' });
             panel.appendChild(contextCard);
 
-            // 4. Latest Round Stats Card
-            const roundCard = el('div', 'margin-top:10px;', [
-                el('div', 'font-weight:600;font-size:11.5px;margin-bottom:6px;display:flex;justify-content:space-between;', [
-                    el('span', null, 'Latest Turn Telemetry'),
-                    el('span', 'color:#38bdf8;', 'Round #' + state.sessionStats.totalRounds, { id: 'agm-dash-round-num' })
-                ]),
-                el('div', 'display:grid;grid-template-columns: 1fr 1fr;gap:6px;', [
-                    el('div', 'background:#18181b;padding:6px 8px;border-radius:6px;border:1px solid rgba(255,255,255,0.08);', [
-                        el('div', 'font-size:10px;color:#cbd5e1;font-weight:500;display:flex;align-items:center;gap:3px;', '⏱️ Msg Duration', { className: 'agm-telemetry-label' }),
-                        el('div', 'font-weight:600;font-size:12.5px;margin-top:2px;color:#f8fafc;letter-spacing:0.1px;', '0.0s', { id: 'agm-dash-round-duration', className: 'agm-telemetry-value' })
-                    ], { className: 'agm-telemetry-box' }),
-                    el('div', 'background:#18181b;padding:6px 8px;border-radius:6px;border:1px solid rgba(255,255,255,0.08);', [
-                        el('div', 'font-size:10px;color:#cbd5e1;font-weight:500;display:flex;align-items:center;gap:3px;', '🪙 Turn Tokens', { className: 'agm-telemetry-label' }),
-                        el('div', 'font-weight:600;font-size:12.5px;margin-top:2px;color:#f8fafc;letter-spacing:0.1px;', '+0 tok', { id: 'agm-dash-round-tokens', className: 'agm-telemetry-value' })
-                    ], { className: 'agm-telemetry-box' }),
-                    el('div', 'background:#18181b;padding:6px 8px;border-radius:6px;border:1px solid rgba(255,255,255,0.08);', [
-                        el('div', 'font-size:10px;color:#cbd5e1;font-weight:500;display:flex;align-items:center;gap:3px;', '🛠️ Tool Calls', { className: 'agm-telemetry-label' }),
-                        el('div', 'font-weight:600;font-size:12.5px;margin-top:2px;color:#f8fafc;letter-spacing:0.1px;', '0 tools', { id: 'agm-dash-round-tools', className: 'agm-telemetry-value' })
-                    ], { className: 'agm-telemetry-box' }),
-                    el('div', 'background:#18181b;padding:6px 8px;border-radius:6px;border:1px solid rgba(255,255,255,0.08);', [
-                        el('div', 'font-size:10px;color:#cbd5e1;font-weight:500;display:flex;align-items:center;gap:3px;', '⚡ Speed', { className: 'agm-telemetry-label' }),
-                        el('div', 'font-weight:600;font-size:12.5px;margin-top:2px;color:#f8fafc;letter-spacing:0.1px;', '~72 tok/s', { id: 'agm-dash-speed', className: 'agm-telemetry-value' })
-                    ], { className: 'agm-telemetry-box' })
-                ])
-            ], { className: 'agm-card' });
-            panel.appendChild(roundCard);
-
-            // 5. Model Selection & Settings
+            // 4. Model Selection & Settings
             const selectModel = el('select', 'width:100%;', [
                 el('option', null, 'Gemini 3.8 Flash - Antigravity (256,000 tokens)', { value: '256000' }),
                 el('option', null, 'Gemini 3.8 Flash / Pro (1,000,000 tokens)', { value: '1000000' }),
@@ -1077,7 +1161,7 @@
             ], { className: 'agm-card' });
             panel.appendChild(settingsCard);
 
-            // 6. Footer with Shortcut info
+            // 5. Footer with Shortcut info
             const footer = el('div', 'margin-top:12px;display:flex;justify-content:space-between;align-items:center;font-size:10px;color:var(--muted-foreground,#94a3b8);', [
                 el('span', null, 'Shortcut: ⌥M / Alt+M'),
                 el('span', 'color:#38bdf8;cursor:pointer;', 'Refresh Data', { id: 'agm-refresh-btn' })
@@ -1242,43 +1326,9 @@
                 remEl.style.color = zoneInfo.color;
             }
 
-            const roundNumEl = document.getElementById('agm-dash-round-num');
-            const roundDurEl = document.getElementById('agm-dash-round-duration');
-            const roundTokEl = document.getElementById('agm-dash-round-tokens');
-            const roundToolsEl = document.getElementById('agm-dash-round-tools');
-
-            const roundNumStr = 'Round #' + (state.sessionStats.totalRounds || 0);
-            if (roundNumEl && roundNumEl.textContent !== roundNumStr) roundNumEl.textContent = roundNumStr;
-
-            let displayDur = 0;
-            if (state.isGenerating) {
-                displayDur = Math.max(0, Date.now() - state.msgStartTime);
-            } else if (state.lastMsgDurationMs > 0) {
-                displayDur = state.lastMsgDurationMs;
-            } else {
-                displayDur = state.latestRoundStats.durationMs || 0;
-            }
-
-            const durStr = formatDuration(displayDur);
-            if (roundDurEl && roundDurEl.textContent !== durStr) roundDurEl.textContent = durStr;
-
-            const tokStr = '+' + formatTokens(state.latestRoundStats.totalRoundTokens || 0) + ' tok';
-            if (roundTokEl && roundTokEl.textContent !== tokStr) roundTokEl.textContent = tokStr;
-
-            const toolsStr = (state.latestRoundStats.toolCount || 0) + ' tools';
-            if (roundToolsEl && roundToolsEl.textContent !== toolsStr) roundToolsEl.textContent = toolsStr;
-
-            const roundSpeedEl = document.getElementById('agm-dash-speed');
-            if (roundSpeedEl) {
-                const durSec = displayDur / 1000;
-                const tok = state.latestRoundStats.totalRoundTokens || 0;
-                let speedStr = '~72 tok/s';
-                if (durSec > 0.5 && tok > 0) {
-                    const spd = Math.round(tok / durSec);
-                    speedStr = '~' + spd + ' tok/s';
-                }
-                if (roundSpeedEl.textContent !== speedStr) roundSpeedEl.textContent = speedStr;
-            }
+            // Per-turn telemetry lives inline on every message toolbar now
+            // (see syncTurnTelemetry), so the dashboard no longer renders a
+            // "Latest Turn Telemetry" card.
         }
 
         function getStatusBarTarget() {
@@ -1369,14 +1419,16 @@
         });
 
         // Clean up legacy elements from older versions (sidebar pill era,
-        // per-message badges era) if present
+        // standalone per-message badge era) if present
         function cleanLegacyPill() {
             const oldPill = document.getElementById('antigravity-metrics-pill');
             if (oldPill) oldPill.remove();
-            // Per-message end badges were removed as a feature (wrong
-            // numbers, visual noise): strip any left in the DOM.
+            // The old badges were appended INSIDE the message body and carried
+            // guessed numbers. Superseded by .agm-turn-dur, which lives
+            // in the native toolbar — strip any left by a previous version so an
+            // upgrade never shows both.
             try {
-                document.querySelectorAll('.agm-msg-badge').forEach(b => b.remove());
+                document.querySelectorAll('.agm-msg-badge, .agm-turn-chip').forEach(b => b.remove());
             } catch (_) {}
         }
 
@@ -1398,6 +1450,7 @@
                 ensureTopbarButton();
                 tryInsertStatusBarItem();
                 scanDomMetrics();
+                syncTurnTelemetry();
             } catch (err) {
                 console.error('[Antigravity Metrics] runScanAndSync error:', err);
             } finally {
@@ -1456,18 +1509,23 @@
                 if (isInternalMutation) return;
 
                 // Check if any mutation is external (not our own widgets)
+                const isOurNode = (node) => {
+                    if (!node) return false;
+                    if (node.id && (node.id.startsWith('agm-') || node.id.startsWith('antigravity-metrics-'))) return true;
+                    // The per-turn telemetry has no id (it must not disturb the
+                    // native row's child list identity), so match on its classes.
+                    return typeof node.className === 'string' && node.className.indexOf('agm-turn-') !== -1;
+                };
                 const hasExternal = mutations.some(m => {
-                    if (m.target && m.target.closest && m.target.closest('#agm-topbar-btn, #antigravity-metrics-panel, #antigravity-metrics-statusbar-btn')) {
+                    if (m.target && m.target.closest && m.target.closest('#agm-topbar-btn, #antigravity-metrics-panel, #antigravity-metrics-statusbar-btn, .agm-turn-dur')) {
                         return false;
                     }
                     for (let i = 0; i < m.addedNodes.length; i++) {
-                        const node = m.addedNodes[i];
-                        if (node.id && (node.id.startsWith('agm-') || node.id.startsWith('antigravity-metrics-'))) continue;
+                        if (isOurNode(m.addedNodes[i])) continue;
                         return true;
                     }
                     for (let i = 0; i < m.removedNodes.length; i++) {
-                        const node = m.removedNodes[i];
-                        if (node.id && (node.id.startsWith('agm-') || node.id.startsWith('antigravity-metrics-'))) continue;
+                        if (isOurNode(m.removedNodes[i])) continue;
                         return true;
                     }
                     return false;
