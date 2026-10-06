@@ -109,7 +109,7 @@ function findTranscriptForChat(query) {
         if (!fs.existsSync(BRAIN_DIR)) return null;
 
         // If explicitly a new empty conversation, never attach old transcripts
-        if (query && (query.isNewConversation || query.title === 'New Conversation')) {
+        if (query && (query.isNewConversation || query.title === 'New Conversation' || query.key === 'new-chat')) {
             return null;
         }
 
@@ -119,23 +119,6 @@ function findTranscriptForChat(query) {
             if (fs.existsSync(direct)) return direct;
         }
 
-        // 2. Query title via SQLite conversation_summaries.db
-        if (query && query.title) {
-            const resolvedId = findConversationIdByTitle(query.title);
-            if (resolvedId) {
-                const direct = path.join(BRAIN_DIR, resolvedId, '.system_generated', 'logs', 'transcript.jsonl');
-                if (fs.existsSync(direct)) return direct;
-            }
-        }
-
-        // 3. Fallback: most recently active conversation from SQLite
-        const mostRecentId = findMostRecentConversationId();
-        if (mostRecentId) {
-            const direct = path.join(BRAIN_DIR, mostRecentId, '.system_generated', 'logs', 'transcript.jsonl');
-            if (fs.existsSync(direct)) return direct;
-        }
-
-        // 4. Disk fallback: scan directory mtime
         const entries = fs.readdirSync(BRAIN_DIR, { withFileTypes: true });
         const convDirs = [];
         for (const e of entries) {
@@ -151,9 +134,73 @@ function findTranscriptForChat(query) {
         }
         convDirs.sort((a, b) => b.mtimeMs - a.mtimeMs);
 
-        if (convDirs.length > 0) {
-            return convDirs[0].tPath;
+        const cleanPrompt = (query && query.firstPrompt ? query.firstPrompt : '').trim().toLowerCase();
+        const cleanTitle = (query && query.title && query.title !== 'Active Conversation' && query.title !== 'New Conversation' ? query.title : '').trim().toLowerCase();
+
+        // 2. Direct firstPrompt match in transcript file content (checks top 60 recent conversations)
+        if (cleanPrompt && cleanPrompt.length >= 4) {
+            const target = cleanPrompt.replace(/[^\w\s\u0600-\u06FF]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 35);
+            if (target.length >= 4) {
+                for (const d of convDirs.slice(0, 60)) {
+                    try {
+                        const fd = fs.openSync(d.tPath, 'r');
+                        const buf = Buffer.alloc(8192);
+                        const bytes = fs.readSync(fd, buf, 0, 8192, 0);
+                        fs.closeSync(fd);
+                        const snippet = buf.toString('utf8', 0, bytes).toLowerCase();
+                        if (snippet.includes(target)) {
+                            return d.tPath;
+                        }
+                    } catch (_) {}
+                }
+            }
         }
+
+        // 3. SQLite title match
+        if (cleanTitle && cleanTitle.length >= 2) {
+            const resolvedId = findConversationIdByTitle(cleanTitle);
+            if (resolvedId) {
+                const direct = path.join(BRAIN_DIR, resolvedId, '.system_generated', 'logs', 'transcript.jsonl');
+                if (fs.existsSync(direct)) return direct;
+            }
+        }
+
+        // 4. SQLite prompt match
+        if (cleanPrompt && cleanPrompt.length >= 4) {
+            const target = cleanPrompt.slice(0, 30);
+            const resolvedId = findConversationIdByTitle(target);
+            if (resolvedId) {
+                const direct = path.join(BRAIN_DIR, resolvedId, '.system_generated', 'logs', 'transcript.jsonl');
+                if (fs.existsSync(direct)) return direct;
+            }
+        }
+
+        // 5. Active generation / newly created session fallback:
+        // ONLY if the newest conversation folder was modified within the last 25 seconds
+        if (convDirs.length > 0) {
+            const mostRecent = convDirs[0];
+            const ageMs = Date.now() - mostRecent.mtimeMs;
+            if (ageMs < 25000) {
+                if (cleanPrompt) {
+                    try {
+                        const fd = fs.openSync(mostRecent.tPath, 'r');
+                        const buf = Buffer.alloc(8192);
+                        const bytes = fs.readSync(fd, buf, 0, 8192, 0);
+                        fs.closeSync(fd);
+                        const snippet = buf.toString('utf8', 0, bytes).toLowerCase();
+                        const target = cleanPrompt.replace(/[^\w\s\u0600-\u06FF]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 20);
+                        if (snippet.includes(target)) {
+                            return mostRecent.tPath;
+                        }
+                    } catch (_) {}
+                } else if (!cleanTitle) {
+                    return mostRecent.tPath;
+                }
+            }
+        }
+
+        // NEVER return an unrelated transcript
+        return null;
     } catch (_) {}
     return null;
 }
@@ -302,17 +349,30 @@ app.on('browser-window-created', (_event, win) => {
                     }
                     watchedTranscriptPath = transcriptPath;
                     try {
-                        watcher = fs.watch(transcriptPath, () => {
-                            if (watchDebounceTimer) clearTimeout(watchDebounceTimer);
-                            watchDebounceTimer = setTimeout(() => {
-                                const updated = parseTranscript(transcriptPath);
-                                if (updated) {
-                                    win.webContents.executeJavaScript(
-                                        `window.__ANTIGRAVITY_METRICS_UPDATE__ && window.__ANTIGRAVITY_METRICS_UPDATE__(${JSON.stringify(updated)});`
-                                    ).catch(() => {});
+                        const setupWatcher = () => {
+                            return fs.watch(transcriptPath, (eventType) => {
+                                if (eventType === 'rename') {
+                                    setTimeout(() => {
+                                        if (watchedTranscriptPath === transcriptPath && fs.existsSync(transcriptPath)) {
+                                            try {
+                                                if (watcher) watcher.close();
+                                                watcher = setupWatcher();
+                                            } catch (_) {}
+                                        }
+                                    }, 250);
                                 }
-                            }, 300);
-                        });
+                                if (watchDebounceTimer) clearTimeout(watchDebounceTimer);
+                                watchDebounceTimer = setTimeout(() => {
+                                    const updated = parseTranscript(transcriptPath);
+                                    if (updated) {
+                                        win.webContents.executeJavaScript(
+                                            `window.__ANTIGRAVITY_METRICS_UPDATE__ && window.__ANTIGRAVITY_METRICS_UPDATE__(${JSON.stringify(updated)});`
+                                        ).catch(() => {});
+                                    }
+                                }, 300);
+                            });
+                        };
+                        watcher = setupWatcher();
                     } catch (_) {}
                 }
 
@@ -322,6 +382,17 @@ app.on('browser-window-created', (_event, win) => {
                         `window.__ANTIGRAVITY_METRICS_UPDATE__ && window.__ANTIGRAVITY_METRICS_UPDATE__(${JSON.stringify(metrics)});`
                     ).catch(() => {});
                 }
+            } else {
+                if (watchedTranscriptPath && (!query || !query.isNewConversation)) {
+                    if (watcher) {
+                        try { watcher.close(); } catch (_) {}
+                        watcher = null;
+                    }
+                    watchedTranscriptPath = null;
+                }
+                win.webContents.executeJavaScript(
+                    `window.__ANTIGRAVITY_METRICS_UPDATE__ && window.__ANTIGRAVITY_METRICS_UPDATE__({ notFound: true, query: ${JSON.stringify(query || {})} });`
+                ).catch(() => {});
             }
         } catch (_) {}
     };

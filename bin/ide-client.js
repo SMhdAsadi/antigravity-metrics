@@ -33,6 +33,7 @@
             isGenerating: false,
             msgStartTime: 0,
             lastMsgDurationMs: 0,
+            latestLiveTokens: 0,
             latestRoundStats: {
                 durationMs: 0,
                 inputTokens: 0,
@@ -159,6 +160,8 @@
                 const payload = chatQuery || {
                     id: state.currentChatId || active.id || '',
                     title: state.currentChatTitle || active.title || '',
+                    firstPrompt: active.firstPrompt || '',
+                    key: active.key || '',
                     isNewConversation: active.isNewConversation || false
                 };
                 console.log('REQUEST_TRANSCRIPT_METRICS|' + JSON.stringify(payload));
@@ -169,6 +172,13 @@
         window.__ANTIGRAVITY_METRICS_UPDATE__ = function(data) {
             if (!data) return;
 
+            if (data.notFound) {
+                state.hasTranscriptData = false;
+                state.currentChatId = '';
+                scanDomMetrics();
+                return;
+            }
+
             const activeChat = detectActiveChat();
             // Only drop if user is in an unstarted new conversation with 0 messages and data has no rounds
             if (activeChat.isNewConversation && (!data.rounds || data.rounds.length === 0) && !state.isGenerating) {
@@ -176,14 +186,23 @@
             }
 
             // If update contains a conversationId, verify against active chat if known
-            if (data.conversationId) {
-                if (activeChat.id && activeChat.id !== data.conversationId) {
-                    // Update is for a different conversation than active view
+            if (data.conversationId && activeChat.id && activeChat.id !== data.conversationId) {
+                return;
+            }
+
+            // Verify firstPrompt if available on both sides to prevent mismatched updates
+            if (activeChat.firstPrompt && data.firstPrompt) {
+                const cleanA = activeChat.firstPrompt.replace(/[^\w\s\u0600-\u06FF]/g, ' ').replace(/\s+/g, ' ').trim().toLowerCase().slice(0, 25);
+                const cleanD = data.firstPrompt.replace(/[^\w\s\u0600-\u06FF]/g, ' ').replace(/\s+/g, ' ').trim().toLowerCase().slice(0, 25);
+                if (cleanA.length >= 4 && cleanD.length >= 4 && !cleanA.includes(cleanD) && !cleanD.includes(cleanA)) {
                     return;
                 }
+            }
+
+            if (data.conversationId) {
                 state.currentChatId = data.conversationId;
-                if (!state.currentChatKey || state.currentChatKey === 'default-chat') {
-                    state.currentChatKey = data.conversationId;
+                if (!state.currentChatKey || state.currentChatKey === 'default-chat' || state.currentChatKey === 'active-dom-chat') {
+                    state.currentChatKey = 'id:' + data.conversationId;
                 }
             }
 
@@ -208,14 +227,15 @@
                 rounds: Array.isArray(state.rounds) ? [...state.rounds] : [],
                 hasTranscriptData: true,
                 title: state.currentChatTitle,
-                id: state.currentChatId
+                id: state.currentChatId,
+                firstPrompt: data.firstPrompt || activeChat.firstPrompt || ''
             };
 
             if (state.currentChatKey) {
                 state.chatMetricsCache[state.currentChatKey] = cacheEntry;
             }
             if (data.conversationId) {
-                state.chatMetricsCache[data.conversationId] = cacheEntry;
+                state.chatMetricsCache['id:' + data.conversationId] = cacheEntry;
             }
 
             updateUI();
@@ -390,26 +410,37 @@
             return null;
         }
 
-        function findActiveCascadeId() {
+        function findActiveConversationId() {
             try {
-                // 1. Direct attribute check on any tagged element
-                const tagged = document.querySelector('[data-cascade-id], [data-conversation-id], [data-chat-id], [data-session-id]');
-                if (tagged) {
-                    const val = tagged.getAttribute('data-cascade-id') ||
-                                tagged.getAttribute('data-conversation-id') ||
-                                tagged.getAttribute('data-chat-id') ||
-                                tagged.getAttribute('data-session-id');
-                    if (val && /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i.test(val)) {
-                        return val;
+                const uuidRegex = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
+
+                // 1. Direct attribute check on tagged elements
+                const tagged = document.querySelectorAll('[data-cascade-id], [data-conversation-id], [data-chat-id], [data-session-id], [data-thread-id]');
+                for (const el of tagged) {
+                    const val = el.getAttribute('data-conversation-id') ||
+                                el.getAttribute('data-chat-id') ||
+                                el.getAttribute('data-session-id') ||
+                                el.getAttribute('data-thread-id') ||
+                                el.getAttribute('data-cascade-id');
+                    if (val && uuidRegex.test(val)) {
+                        return val.match(uuidRegex)[0];
                     }
                 }
 
-                // 2. Scan React fibers on container elements
+                // 2. Links with conversation:// or brain/ or chat
+                const links = document.querySelectorAll('a[href*="conversation"], a[href*="brain"], a[href*="chat"]');
+                for (const a of links) {
+                    const match = (a.href || '').match(uuidRegex);
+                    if (match) return match[0];
+                }
+
+                // 3. Scan React fibers on container elements
                 const selectors = [
                     '.overflow-y-auto',
                     '[class*="cascade"]',
                     '[class*="conversation"]',
                     '[class*="chat"]',
+                    '[class*="jetski"]',
                     '.tab.active',
                     '[role="tab"][aria-selected="true"]',
                     'textarea',
@@ -427,12 +458,21 @@
                     while (curr && depth < 30) {
                         const props = curr.memoizedProps;
                         if (props) {
-                            const cid = props.cascadeId || props.conversationId || props.activeCascadeId || props.sessionId;
-                            if (cid && typeof cid === 'string' && /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i.test(cid)) {
-                                return cid;
+                            const cid = props.conversationId || (props.conversation && props.conversation.id) ||
+                                        props.chatId || (props.chat && props.chat.id) ||
+                                        props.activeConversationId || props.activeChatId ||
+                                        props.sessionId || (props.session && props.session.id) ||
+                                        props.cascadeId || props.threadId;
+                            if (cid && typeof cid === 'string' && uuidRegex.test(cid)) {
+                                return cid.match(uuidRegex)[0];
                             }
-                            if (props.session && typeof props.session.id === 'string' && /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i.test(props.session.id)) {
-                                return props.session.id;
+                        }
+                        const stateProps = curr.memoizedState;
+                        if (stateProps) {
+                            const cid = stateProps.conversationId || (stateProps.conversation && stateProps.conversation.id) ||
+                                        stateProps.activeConversationId || stateProps.sessionId;
+                            if (cid && typeof cid === 'string' && uuidRegex.test(cid)) {
+                                return cid.match(uuidRegex)[0];
                             }
                         }
                         curr = curr.return;
@@ -443,13 +483,41 @@
             return null;
         }
 
+        function extractFirstPromptFromDom() {
+            try {
+                const userSteps = document.querySelectorAll(
+                    '[data-testid="user-input-step"], [aria-label="User message"], [data-role="user"], [data-testid="chat-user-message"], [data-testid="chat-message"][data-role="user"]'
+                );
+                let firstEl = userSteps.length > 0 ? userSteps[0] : null;
+                if (!firstEl) {
+                    const allBubbles = document.querySelectorAll('[data-testid="chat-message"], [class*="message-bubble"], .leading-relaxed');
+                    for (const b of allBubbles) {
+                        if (b.matches('[data-role="user"], [aria-label*="user"]') || b.closest('[data-role="user"], [aria-label*="user"]')) {
+                            firstEl = b;
+                            break;
+                        }
+                    }
+                }
+                if (firstEl) {
+                    let raw = firstEl.textContent || '';
+                    const reqMatch = raw.match(/<USER_REQUEST>([\s\S]*?)<\/USER_REQUEST>/i);
+                    if (reqMatch) raw = reqMatch[1];
+                    raw = raw.replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim();
+                    if (raw.length > 0) {
+                        return raw;
+                    }
+                }
+            } catch (_) {}
+            return '';
+        }
+
         // Active Chat Identification
         function detectActiveChat() {
             let title = '';
             let id = '';
 
-            // 1. Detect conversation UUID via React Fiber & DOM attributes
-            id = findActiveCascadeId() || '';
+            // 1. Detect conversation UUID
+            id = findActiveConversationId() || '';
 
             // 2. Detect from URL (if available)
             if (!id) {
@@ -460,10 +528,13 @@
                 } catch (_) {}
             }
 
-            // 3. Detect from active sidebar item (scoped to navigation/sidebar)
+            // 3. Extract first user prompt as reliable chat fingerprint
+            const firstPrompt = extractFirstPromptFromDom();
+
+            // 4. Detect from active sidebar item (scoped to navigation/sidebar)
             try {
                 const sidebarContainers = document.querySelectorAll(
-                    'nav, aside, [role="navigation"], [data-testid*="sidebar"], [data-testid*="conversation-list"], [class*="sidebar"]'
+                    'nav, aside, [role="navigation"], [data-testid*="sidebar"], [data-testid*="conversation-list"], [class*="sidebar"], [class*="history"]'
                 );
 
                 for (const nav of sidebarContainers) {
@@ -499,7 +570,7 @@
                 }
             } catch (_) {}
 
-            // 4. Detect from active editor tab
+            // 5. Detect from active editor tab
             if (!title) {
                 const activeTab = document.querySelector('.tab.active .label-name, [role="tab"][aria-selected="true"]');
                 if (activeTab) {
@@ -510,7 +581,7 @@
                 }
             }
 
-            // 5. Detect from breadcrumb or header title
+            // 6. Detect from breadcrumb or header title
             if (!title) {
                 const headerEl =
                     document.querySelector('[data-testid="conversation-title"]') ||
@@ -522,26 +593,46 @@
                 }
             }
 
-            // 6. Check for messages presence in DOM
+            // 7. Check for messages presence in DOM
             const messageElements = document.querySelectorAll(
                 '[aria-label="User message"], [aria-label="Agent response"], [data-testid="chat-message"], [data-testid="user-input-step"], [data-role="user"], [data-testid="conversation-view"] .leading-relaxed, .prose, .markdown-body, [class*="message-bubble"]'
             );
             const hasMessages = messageElements.length > 0;
 
-            // 7. Check if this is explicitly a new unstarted conversation
+            // 8. Derive title from firstPrompt if title is not explicit
+            if (!title && firstPrompt) {
+                title = firstPrompt.length > 36 ? firstPrompt.slice(0, 36) + '...' : firstPrompt;
+            }
+
+            // 9. Check if this is explicitly a new unstarted conversation
             const isExplicitNewConvo = (title === 'New Conversation' || title === 'New Chat') ||
-                (!hasMessages && !id && !title);
+                (!hasMessages && !id && !firstPrompt);
 
             if (!title) {
                 title = isExplicitNewConvo ? 'New Conversation' : (hasMessages ? 'Active Conversation' : 'New Conversation');
             }
 
-            const key = id || (title !== 'New Conversation' && title !== 'Active Conversation' ? title : '');
+            // Unique key ensures every different conversation triggers chat change detection
+            let key = '';
+            if (id) {
+                key = 'id:' + id;
+            } else if (firstPrompt) {
+                key = 'prompt:' + firstPrompt.slice(0, 50).toLowerCase().trim();
+            } else if (title && title !== 'Active Conversation' && title !== 'New Conversation') {
+                key = 'title:' + title.toLowerCase().trim();
+            } else if (isExplicitNewConvo) {
+                key = 'new-chat';
+            } else {
+                key = 'active-dom-chat';
+            }
+
             return {
                 title,
                 id,
-                key: key || 'default-chat',
-                isNewConversation: isExplicitNewConvo && !hasMessages
+                firstPrompt,
+                key,
+                isNewConversation: isExplicitNewConvo && !hasMessages,
+                hasMessages
             };
         }
 
@@ -577,11 +668,12 @@
                             toolCount: 0,
                             toolsList: []
                         };
+                        state.rounds = [];
                         state.hasTranscriptData = true;
                         state.currentChatTitle = 'New Conversation';
                         state.currentChatId = '';
-                    } else if (state.chatMetricsCache[activeChat.key] || (activeChat.id && state.chatMetricsCache[activeChat.id])) {
-                        const cached = state.chatMetricsCache[activeChat.key] || state.chatMetricsCache[activeChat.id];
+                    } else if (state.chatMetricsCache[activeChat.key] || (activeChat.id && state.chatMetricsCache['id:' + activeChat.id])) {
+                        const cached = state.chatMetricsCache[activeChat.key] || state.chatMetricsCache['id:' + activeChat.id];
                         state.sessionStats = { ...cached.sessionStats };
                         if (cached.latestRoundStats) state.latestRoundStats = { ...cached.latestRoundStats };
                         if (Array.isArray(cached.rounds)) state.rounds = cached.rounds;
@@ -590,6 +682,7 @@
                         if (cached.id) state.currentChatId = cached.id;
                         requestTranscriptUpdate(activeChat);
                     } else {
+                        state.hasTranscriptData = false;
                         requestTranscriptUpdate(activeChat);
                     }
                 }
@@ -622,7 +715,7 @@
                         }
                         const text = el.textContent || '';
                         aggregatedTokens += estimateTokens(text);
-                        if (el.matches('[data-testid="user-input-step"]') || el.querySelector('[data-testid="user-input-step"]')) {
+                        if (el.matches('[data-testid="user-input-step"], [aria-label="User message"]') || el.querySelector('[data-testid="user-input-step"]')) {
                             userTurns++;
                         }
                     });
@@ -646,7 +739,6 @@
                 }
 
                 // Detect generation status strictly via generation-specific indicators
-                // (Fix Issue 1: NEVER trigger on generic loading spinners or animation classes)
                 const isGenerating = Boolean(
                     document.querySelector('[data-testid="stop-generation"]') ||
                     document.querySelector('button[aria-label*="Stop"]') ||
@@ -665,6 +757,7 @@
                     state.lastMsgDurationMs = Date.now() - state.msgStartTime;
                     state.latestRoundStats.durationMs = state.lastMsgDurationMs;
                     stopLiveTimer();
+                    requestTranscriptUpdate(activeChat);
                 }
 
                 attachMessageBadges();
@@ -685,6 +778,21 @@
                 const elapsed = Math.max(0, Date.now() - state.msgStartTime);
                 const durText = '⚡ ' + formatDuration(elapsed);
 
+                // Update live output tokens from streaming assistant reply
+                const assistantReplies = document.querySelectorAll(
+                    '[aria-label="Agent response"], [data-testid="conversation-view"] .leading-relaxed.select-text, [data-testid="chat-message"]:not([data-testid="user-input-step"])'
+                );
+                const replyList = assistantReplies.length > 0
+                    ? Array.from(assistantReplies)
+                    : Array.from(document.querySelectorAll('.prose, [data-testid="conversation-view"] .leading-relaxed')).filter(el => !el.closest('[data-testid="chat-message"], [data-testid="user-input-step"], [aria-label="User message"]'));
+
+                if (replyList.length > 0) {
+                    const latestReply = replyList[replyList.length - 1];
+                    state.latestLiveTokens = estimateTokens(latestReply.textContent || '');
+                    state.latestRoundStats.outputTokens = state.latestLiveTokens;
+                    state.latestRoundStats.totalRoundTokens = (state.latestRoundStats.inputTokens || 0) + state.latestLiveTokens + (state.latestRoundStats.thinkingTokens || 0);
+                }
+
                 const badges = document.querySelectorAll('.agm-msg-badge');
                 if (badges.length > 0) {
                     const latestBadge = badges[badges.length - 1];
@@ -701,6 +809,8 @@
                         roundDurEl.textContent = formatted;
                     }
                 }
+
+                updateButtonText();
             }, 250);
         }
 
@@ -709,6 +819,8 @@
                 clearInterval(liveTimerInterval);
                 liveTimerInterval = null;
             }
+            state.latestLiveTokens = 0;
+            updateButtonText();
         }
 
         // Attach per-message metrics badge to assistant replies
@@ -870,7 +982,10 @@
             const pctEl = document.getElementById('agm-topbar-pct');
             const tokensEl = document.getElementById('agm-topbar-tokens');
 
-            const totalTokens = state.sessionStats.totalTokens || 0;
+            let totalTokens = state.sessionStats.totalTokens || 0;
+            if (state.isGenerating && state.latestLiveTokens > 0) {
+                totalTokens += state.latestLiveTokens;
+            }
             const limit = state.config.modelLimit || 256000;
             const pct = Math.min(100, ((totalTokens / limit) * 100)).toFixed(1);
             const pctStr = `${pct}%`;
@@ -1106,7 +1221,10 @@
             const panel = document.getElementById('antigravity-metrics-panel');
             if (!panel || panel.style.display === 'none') return;
 
-            const totalTokens = state.sessionStats.totalTokens || 0;
+            let totalTokens = state.sessionStats.totalTokens || 0;
+            if (state.isGenerating && state.latestLiveTokens > 0) {
+                totalTokens += state.latestLiveTokens;
+            }
             const limit = state.config.modelLimit || 256000;
             const pct = Math.min(100, (totalTokens / limit) * 100);
             const remaining = Math.max(0, limit - totalTokens);
