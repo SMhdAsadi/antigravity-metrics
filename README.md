@@ -9,7 +9,7 @@
 [![Compatible](https://img.shields.io/badge/Compatible%20with-antigravity--rtl-orange.svg)](https://github.com/mmnaderi/antigravity-rtl)
 
 ```
-[ 🟢 14.8s (Running)  |  📊 4.8% (48.2k)  |  Round #5 ]
+[ 📊 4.8% (48.2k) ]
 ```
 
 [Features](#features) · [UI Overview](#ui-overview) · [Install](#install) · [CLI Options](#cli-options) · [Uninstall](#uninstall) · [How It Works](#how-it-works) · [فارسی](#فارسی)
@@ -20,52 +20,43 @@
 
 Inspired by the brilliant patching mechanism of [**antigravity-rtl**](https://github.com/mmnaderi/antigravity-rtl), **Antigravity Metrics** injects a native telemetry and analytics HUD directly into your **Antigravity** chat sessions (both the **Standalone Desktop App** and **Antigravity IDE**).
 
-It gives you full visibility into context consumption, agent processing speed, per-round cost and tokens, and real-time execution duration—without leaving your workflow.
+It gives you full visibility into context consumption, per-chat token tracking, per-message execution duration, and real-time telemetry—without leaving your workflow.
 
 ---
 
 ## Features
 
-- ⏱️ **Live Agent Execution Timer**:
-  - Live stopwatch counting up in real-time (`⚡ 14.2s (Running)`) while the agent is thinking and running tools.
-  - Automatically freezes when done (`✓ Completed in 28.4s`).
-  - Stage duration breakdown: Thinking time, Tool execution time, and Response generation time.
-
-- 📊 **Context Window Health & Remaining Limit**:
+- 📊 **Context Window Health & Per-Chat Usage**:
+  - Dynamically updates as you switch conversations in Antigravity.
   - Real-time percentage indicator with color-coded gauge (Green `<60%`, Amber `60%-80%`, Crimson `>80%`).
   - Exact token count (e.g. `48,250 / 1,000,000 tokens`).
   - Tokens remaining before model compaction or truncation (e.g. `~951,750 tokens left`).
   - Presets for **Gemini 1.5/2.0 Flash (1M)**, **Gemini Pro (2M)**, **Claude 3.7 Sonnet (200k)**, **GPT-4o (128k)**, or custom limits.
 
-- 🪙 **Per-Round Token Usage Breakdown**:
-  - Net tokens consumed in the current turn: Prompt input, Thinking/reasoning tokens, and Model output.
-  - Attached subtle footer pill on each assistant response:
-    `⏱️ 14.2s · 🪙 5.4k tok · 🛠️ 3 tools · ⚡ 78 tok/s`
+- ⏱️ **Per-Message Execution Telemetry**:
+  - Attached subtle footer badge on each assistant response:
+    `[ 🪙 3.4k tok · ⏱️ 14.2s ]`
+  - Live duration counter (`⚡ 4.2s`) strictly while the agent is actively generating.
+  - No disruptive global timers when browsing finished chats.
 
-- 🛠️ **Tool Activity & Step Intelligence**:
-  - Real-time tool call count per round and across the entire session.
-  - Inspect which tools were executed (`run_command`, `view_file`, `write_to_file`, etc.).
-
-- ⚡ **Generation Velocity & Cost Estimator**:
-  - Real-time throughput indicator (`~78 tokens/sec`).
-  - Approximate session cost based on active model rates.
-
-- 🤝 **100% Compatible with `antigravity-rtl`**:
-  - Can be installed before, after, or alongside `antigravity-rtl` with **zero conflicts**.
-  - Respects native Antigravity theme tokens (dark & light modes).
+- 🛠️ **Dedicated Topbar Header Button**:
+  - Unified button placed seamlessly at the top header alongside native actions (`Open IDE`, `Update Available`, `RTL`).
+  - Displays token consumption percentage and count: `[ 📊 4.8% (48.2k) ]`.
+  - Zero scrollbar interference or window layout breakage.
+  - Clicking toggles the **Flyout Dashboard** (`⌥M` / `Alt+M`).
 
 ---
 
 ## UI Overview
 
-### 1. Header HUD Pill
-Placed right in your chat header next to title actions:
+### 1. Header Button
+Placed cleanly in your chat header next to title actions:
 ```
 ┌──────────────────────────────────────────────────────────┐
-│  [ ⚡ 14.2s  |  📊 4.8%  (48.2k)  |  Round #5 ]   ⚙️  ✕   │
+│                             [ 📊 4.8% (48.2k) ]   ⚙️  ✕   │
 └──────────────────────────────────────────────────────────┘
 ```
-Clicking the pill toggles the **Flyout Dashboard** (`⌥M` / `Alt+M`).
+Clicking the button toggles the **Flyout Dashboard** (`⌥M` / `Alt+M`).
 
 ### 2. Flyout Analytics Dashboard
 ```
