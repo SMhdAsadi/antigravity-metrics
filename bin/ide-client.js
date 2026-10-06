@@ -334,6 +334,27 @@
                     border-radius: 8px;
                     padding: 8px 10px;
                 }
+                .agm-telemetry-box {
+                    background: #18181b !important;
+                    border: 1px solid rgba(255, 255, 255, 0.08) !important;
+                    border-radius: 6px;
+                    padding: 6px 8px;
+                }
+                .agm-telemetry-label {
+                    font-size: 10px !important;
+                    font-weight: 500 !important;
+                    color: #cbd5e1 !important;
+                    display: flex !important;
+                    align-items: center !important;
+                    gap: 3px !important;
+                }
+                .agm-telemetry-value {
+                    font-weight: 600 !important;
+                    font-size: 12.5px !important;
+                    margin-top: 2px !important;
+                    color: #f8fafc !important;
+                    letter-spacing: 0.1px !important;
+                }
                 .agm-select {
                     background: var(--vscode-input-background, var(--muted, #27272a));
                     color: var(--vscode-input-foreground, var(--foreground, #f4f4f5));
@@ -857,22 +878,22 @@
                     el('span', 'color:#38bdf8;', 'Round #' + state.sessionStats.totalRounds, { id: 'agm-dash-round-num' })
                 ]),
                 el('div', 'display:grid;grid-template-columns: 1fr 1fr;gap:6px;', [
-                    el('div', 'background:var(--popover, #18181b);padding:6px;border-radius:6px;border:1px solid var(--border, rgba(255,255,255,0.06));', [
-                        el('div', 'font-size:10px;color:var(--muted-foreground,#a1a1aa);', '⏱️ Msg Duration'),
-                        el('div', 'font-weight:600;font-size:12px;margin-top:2px;', '0.0s', { id: 'agm-dash-round-duration' })
-                    ]),
-                    el('div', 'background:var(--popover, #18181b);padding:6px;border-radius:6px;border:1px solid var(--border, rgba(255,255,255,0.06));', [
-                        el('div', 'font-size:10px;color:var(--muted-foreground,#a1a1aa);', '🪙 Turn Tokens'),
-                        el('div', 'font-weight:600;font-size:12px;margin-top:2px;', '+0 tok', { id: 'agm-dash-round-tokens' })
-                    ]),
-                    el('div', 'background:var(--popover, #18181b);padding:6px;border-radius:6px;border:1px solid var(--border, rgba(255,255,255,0.06));', [
-                        el('div', 'font-size:10px;color:var(--muted-foreground,#a1a1aa);', '🛠️ Tool Calls'),
-                        el('div', 'font-weight:600;font-size:12px;margin-top:2px;', '0 tools', { id: 'agm-dash-round-tools' })
-                    ]),
-                    el('div', 'background:var(--popover, #18181b);padding:6px;border-radius:6px;border:1px solid var(--border, rgba(255,255,255,0.06));', [
-                        el('div', 'font-size:10px;color:var(--muted-foreground,#a1a1aa);', '⚡ Speed'),
-                        el('div', 'font-weight:600;font-size:12px;margin-top:2px;', '~72 tok/s', { id: 'agm-dash-speed' })
-                    ])
+                    el('div', 'background:#18181b;padding:6px 8px;border-radius:6px;border:1px solid rgba(255,255,255,0.08);', [
+                        el('div', 'font-size:10px;color:#cbd5e1;font-weight:500;display:flex;align-items:center;gap:3px;', '⏱️ Msg Duration', { className: 'agm-telemetry-label' }),
+                        el('div', 'font-weight:600;font-size:12.5px;margin-top:2px;color:#f8fafc;letter-spacing:0.1px;', '0.0s', { id: 'agm-dash-round-duration', className: 'agm-telemetry-value' })
+                    ], { className: 'agm-telemetry-box' }),
+                    el('div', 'background:#18181b;padding:6px 8px;border-radius:6px;border:1px solid rgba(255,255,255,0.08);', [
+                        el('div', 'font-size:10px;color:#cbd5e1;font-weight:500;display:flex;align-items:center;gap:3px;', '🪙 Turn Tokens', { className: 'agm-telemetry-label' }),
+                        el('div', 'font-weight:600;font-size:12.5px;margin-top:2px;color:#f8fafc;letter-spacing:0.1px;', '+0 tok', { id: 'agm-dash-round-tokens', className: 'agm-telemetry-value' })
+                    ], { className: 'agm-telemetry-box' }),
+                    el('div', 'background:#18181b;padding:6px 8px;border-radius:6px;border:1px solid rgba(255,255,255,0.08);', [
+                        el('div', 'font-size:10px;color:#cbd5e1;font-weight:500;display:flex;align-items:center;gap:3px;', '🛠️ Tool Calls', { className: 'agm-telemetry-label' }),
+                        el('div', 'font-weight:600;font-size:12.5px;margin-top:2px;color:#f8fafc;letter-spacing:0.1px;', '0 tools', { id: 'agm-dash-round-tools', className: 'agm-telemetry-value' })
+                    ], { className: 'agm-telemetry-box' }),
+                    el('div', 'background:#18181b;padding:6px 8px;border-radius:6px;border:1px solid rgba(255,255,255,0.08);', [
+                        el('div', 'font-size:10px;color:#cbd5e1;font-weight:500;display:flex;align-items:center;gap:3px;', '⚡ Speed', { className: 'agm-telemetry-label' }),
+                        el('div', 'font-weight:600;font-size:12.5px;margin-top:2px;color:#f8fafc;letter-spacing:0.1px;', '~72 tok/s', { id: 'agm-dash-speed', className: 'agm-telemetry-value' })
+                    ], { className: 'agm-telemetry-box' })
                 ])
             ], { className: 'agm-card' });
             panel.appendChild(roundCard);
@@ -1094,6 +1115,18 @@
 
             const toolsStr = (state.latestRoundStats.toolCount || 0) + ' tools';
             if (roundToolsEl && roundToolsEl.textContent !== toolsStr) roundToolsEl.textContent = toolsStr;
+
+            const roundSpeedEl = document.getElementById('agm-dash-speed');
+            if (roundSpeedEl) {
+                const durSec = displayDur / 1000;
+                const tok = state.latestRoundStats.totalRoundTokens || 0;
+                let speedStr = '~72 tok/s';
+                if (durSec > 0.5 && tok > 0) {
+                    const spd = Math.round(tok / durSec);
+                    speedStr = '~' + spd + ' tok/s';
+                }
+                if (roundSpeedEl.textContent !== speedStr) roundSpeedEl.textContent = speedStr;
+            }
         }
 
         // Status bar integration for IDE
