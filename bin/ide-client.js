@@ -9,8 +9,8 @@
         window.__antigravity_metrics_injected = true;
 
         const defaultMetricsConfig = {
-            modelLimit: 1000000,
-            modelName: 'Gemini Flash (1M)',
+            modelLimit: 256000,
+            modelName: 'Gemini 3.8 Flash (Antigravity 256k)',
             showMsgBadges: true,
             warnThreshold: 75,
             costPerMIn: 0.075,
@@ -29,6 +29,7 @@
             currentChatTitle: 'New Conversation',
             currentChatId: '',
             currentChatKey: '',
+            hasTranscriptData: false,
             isGenerating: false,
             msgStartTime: 0,
             lastMsgDurationMs: 0,
@@ -43,8 +44,8 @@
             },
             sessionStats: {
                 totalTokens: 0,
-                totalRounds: 1,
-                totalSteps: 1,
+                totalRounds: 0,
+                totalSteps: 0,
                 totalTools: 0
             },
             rounds: [],
@@ -80,6 +81,68 @@
             return `${mins}m ${secs}s`;
         }
 
+        // Cognitive context degradation & dumb zone model
+        function getContextZone(tokens, limit) {
+            tokens = Math.max(0, tokens || 0);
+            limit = Math.max(1, limit || 256000);
+
+            let warnTokens;
+            let dumbZoneTokens;
+
+            if (limit <= 128000) {
+                // e.g. GPT-4o 128k
+                warnTokens = 50000;
+                dumbZoneTokens = 85000;
+            } else if (limit <= 200000) {
+                // e.g. Claude 3.7 Sonnet 200k
+                warnTokens = 80000;
+                dumbZoneTokens = 135000;
+            } else if (limit <= 260000) {
+                // e.g. Gemini 3.8 Flash in Antigravity (256k checkpointer limit)
+                warnTokens = 100000;
+                dumbZoneTokens = 165000;
+            } else if (limit <= 500000) {
+                // 500k custom limit
+                warnTokens = 120000;
+                dumbZoneTokens = 180000;
+            } else {
+                // 1M / 2M (Gemini 3.8 Flash / Pro full windows)
+                // In massive windows, models enter mediocre reasoning after ~130k-150k,
+                // and dumb zone after ~190k-200k, regardless of 1M advertised capacity.
+                warnTokens = 130000;
+                dumbZoneTokens = 190000;
+            }
+
+            if (tokens >= dumbZoneTokens || (limit > 0 && tokens >= limit * 0.85)) {
+                return {
+                    zone: 'dumb',
+                    label: 'Dumb Zone',
+                    badge: '🔴 Dumb Zone',
+                    color: '#ef4444',
+                    bg: 'rgba(239, 68, 68, 0.18)',
+                    description: 'Context rot risk — compaction or fresh session recommended'
+                };
+            } else if (tokens >= warnTokens || (limit > 0 && tokens >= limit * 0.50)) {
+                return {
+                    zone: 'mediocre',
+                    label: 'Mediocre Zone',
+                    badge: '🟡 Attention Degradation',
+                    color: '#f59e0b',
+                    bg: 'rgba(245, 158, 11, 0.18)',
+                    description: 'Attention degradation — subtle instructions may be missed'
+                };
+            } else {
+                return {
+                    zone: 'smart',
+                    label: 'Smart Zone',
+                    badge: '🟢 Smart Zone (Optimal)',
+                    color: '#10b981',
+                    bg: 'rgba(16, 185, 129, 0.18)',
+                    description: 'Optimal reasoning and instruction recall'
+                };
+            }
+        }
+
         // Save Config to main process
         function saveConfig() {
             try {
@@ -104,19 +167,44 @@
         window.__ANTIGRAVITY_METRICS_UPDATE__ = function(data) {
             if (!data) return;
 
-            // If update contains a conversationId and we know our currentChatId, verify match
-            if (data.conversationId && state.currentChatId && data.conversationId !== state.currentChatId) {
+            // If we are currently in an empty new session with 0 messages, do not adopt an old transcript!
+            const activeChat = detectActiveChat();
+            if (activeChat.isEmpty && !state.isGenerating) {
                 return;
+            }
+
+            // If update contains a conversationId and we know our currentChatId, verify match
+            if (data.conversationId) {
+                if (!state.currentChatId) {
+                    state.currentChatId = data.conversationId;
+                } else if (state.currentChatId !== data.conversationId) {
+                    return;
+                }
+            }
+
+            if (data.title && (state.currentChatTitle === 'Active Conversation' || state.currentChatTitle === 'New Conversation' || !state.currentChatTitle)) {
+                state.currentChatTitle = data.title;
             }
 
             if (data.sessionStats) {
                 state.sessionStats = { ...state.sessionStats, ...data.sessionStats };
+                state.hasTranscriptData = true;
             }
             if (data.latestRoundStats) {
                 state.latestRoundStats = { ...state.latestRoundStats, ...data.latestRoundStats };
             }
             if (Array.isArray(data.rounds)) {
                 state.rounds = data.rounds;
+            }
+
+            if (state.currentChatKey) {
+                state.chatMetricsCache[state.currentChatKey] = {
+                    sessionStats: { ...state.sessionStats },
+                    latestRoundStats: { ...state.latestRoundStats },
+                    hasTranscriptData: true,
+                    title: state.currentChatTitle,
+                    id: state.currentChatId
+                };
             }
 
             updateUI();
@@ -272,22 +360,37 @@
                 if (match) id = match[0];
             } catch (_) {}
 
-            // 2. Detect from active sidebar item
+            // 2. Detect from active sidebar item (scoped strictly to navigation / sidebar containers)
             try {
-                const sidebarItem =
-                    document.querySelector('[role="navigation"] [aria-selected="true"]') ||
-                    document.querySelector('[role="navigation"] [data-state="active"]') ||
-                    document.querySelector('[role="navigation"] [data-state="selected"]') ||
-                    document.querySelector('[role="navigation"] [data-active="true"]') ||
-                    document.querySelector('[aria-selected="true"]') ||
-                    document.querySelector('[data-state="active"]') ||
-                    document.querySelector('[data-state="selected"]');
+                const sidebarContainers = document.querySelectorAll(
+                    'nav, aside, [role="navigation"], [data-testid*="sidebar"], [data-testid*="conversation-list"], [class*="sidebar"]'
+                );
 
-                if (sidebarItem) {
-                    const text = sidebarItem.textContent || '';
-                    title = text.replace(/\s*\d+[mhd]\s*$/, '').trim();
-                    const dataId = sidebarItem.getAttribute('data-conversation-id') || sidebarItem.getAttribute('data-id');
-                    if (dataId) id = dataId;
+                for (const nav of sidebarContainers) {
+                    const activeItem = nav.querySelector(
+                        '[aria-selected="true"], [data-state="active"], [data-state="selected"], [data-active="true"], .active'
+                    );
+                    if (activeItem) {
+                        const dataId = activeItem.getAttribute('data-conversation-id') ||
+                                       activeItem.getAttribute('data-id') ||
+                                       activeItem.getAttribute('data-chat-id') ||
+                                       activeItem.getAttribute('data-session-id');
+                        if (dataId) id = dataId;
+
+                        const link = activeItem.matches('a') ? activeItem : activeItem.querySelector('a');
+                        if (link && link.href) {
+                            const linkMatch = link.href.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i);
+                            if (linkMatch && !id) id = linkMatch[0];
+                        }
+
+                        const titleEl = activeItem.querySelector('.title, [class*="title"], h3, h4, span') || activeItem;
+                        let text = titleEl.textContent || '';
+                        text = text.replace(/\s*\d+[mhd]\s*$/, '').trim();
+                        if (text && text.length > 1 && text.toLowerCase() !== 'conversations' && text.toLowerCase() !== 'chats') {
+                            title = text;
+                        }
+                        break;
+                    }
                 }
             } catch (_) {}
 
@@ -298,22 +401,33 @@
                     document.querySelector('[data-testid="chat-header"] h1, [data-testid="chat-header"] h2') ||
                     document.querySelector('header h1, header h2');
                 if (headerEl) {
-                    title = headerEl.textContent?.trim() || '';
+                    const text = headerEl.textContent?.trim() || '';
+                    if (text && text.length > 1) title = text;
                 }
             }
 
-            // 4. Fallback to first user input in the chat view
+            // 4. Fallback to first user input in the chat view (index 0, never a random turn)
+            const userSteps = document.querySelectorAll(
+                '[data-testid="user-input-step"], [data-testid="chat-user-message"], [data-role="user"]'
+            );
+            const hasMessages = userSteps.length > 0 || Boolean(document.querySelector('[data-testid="chat-message"], .prose, .markdown-body'));
+
+            if (!title && userSteps.length > 0) {
+                let raw = userSteps[0].textContent?.trim() || '';
+                const reqMatch = raw.match(/<USER_REQUEST>([\s\S]*?)<\/USER_REQUEST>/i);
+                if (reqMatch) raw = reqMatch[1];
+                raw = raw.replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim();
+                if (raw) {
+                    title = raw.slice(0, 36) + (raw.length > 36 ? '...' : '');
+                }
+            }
+
             if (!title) {
-                const firstUser = document.querySelector('[data-testid="user-input-step"]');
-                if (firstUser) {
-                    const raw = firstUser.textContent?.trim() || '';
-                    if (raw) title = raw.slice(0, 32) + (raw.length > 32 ? '...' : '');
-                }
+                title = hasMessages ? 'Active Conversation' : 'New Conversation';
             }
 
-            if (!title) title = 'Active Conversation';
-
-            return { title, id, key: id || title };
+            const key = id || (title !== 'New Conversation' && title !== 'Active Conversation' ? title : '');
+            return { title, id, key: key || 'default-chat', isEmpty: !hasMessages && userSteps.length === 0 };
         }
 
         // Analyze DOM metrics specifically for the active chat
@@ -321,53 +435,113 @@
             try {
                 // Check if active chat changed
                 const activeChat = detectActiveChat();
-                if (activeChat.key && activeChat.key !== state.currentChatKey) {
-                    state.currentChatKey = activeChat.key;
-                    state.currentChatTitle = activeChat.title;
-                    state.currentChatId = activeChat.id;
+                const chatKeyChanged = activeChat.key && activeChat.key !== state.currentChatKey;
 
-                    // Load cached metrics or reset
-                    if (state.chatMetricsCache[activeChat.key]) {
-                        state.sessionStats = { ...state.chatMetricsCache[activeChat.key] };
+                if (chatKeyChanged) {
+                    state.currentChatKey = activeChat.key;
+                    if (activeChat.title && activeChat.title !== 'Active Conversation') {
+                        state.currentChatTitle = activeChat.title;
+                    }
+                    if (activeChat.id) {
+                        state.currentChatId = activeChat.id;
+                    }
+
+                    if (activeChat.isEmpty) {
+                        state.sessionStats = {
+                            totalTokens: 0,
+                            totalRounds: 0,
+                            totalSteps: 0,
+                            totalTools: 0
+                        };
+                        state.latestRoundStats = {
+                            durationMs: 0,
+                            inputTokens: 0,
+                            outputTokens: 0,
+                            thinkingTokens: 0,
+                            totalRoundTokens: 0,
+                            toolCount: 0,
+                            toolsList: []
+                        };
+                        state.hasTranscriptData = true;
+                        state.currentChatTitle = 'New Conversation';
+                    } else if (state.chatMetricsCache[activeChat.key]) {
+                        const cached = state.chatMetricsCache[activeChat.key];
+                        state.sessionStats = { ...cached.sessionStats };
+                        if (cached.latestRoundStats) state.latestRoundStats = { ...cached.latestRoundStats };
+                        state.hasTranscriptData = cached.hasTranscriptData || false;
+                        if (cached.title) state.currentChatTitle = cached.title;
+                        if (cached.id) state.currentChatId = cached.id;
+                        requestTranscriptUpdate(activeChat);
                     } else {
                         state.sessionStats = {
                             totalTokens: 0,
-                            totalRounds: 1,
-                            totalSteps: 1,
+                            totalRounds: 0,
+                            totalSteps: 0,
                             totalTools: 0
                         };
+                        state.latestRoundStats = {
+                            durationMs: 0,
+                            inputTokens: 0,
+                            outputTokens: 0,
+                            thinkingTokens: 0,
+                            totalRoundTokens: 0,
+                            toolCount: 0,
+                            toolsList: []
+                        };
+                        state.hasTranscriptData = false;
+                        requestTranscriptUpdate(activeChat);
                     }
-
-                    // Request ground-truth telemetry from backend for this chat
-                    requestTranscriptUpdate(activeChat);
                 }
 
-                // Scan all messages in the active conversation
-                const messageElements = document.querySelectorAll(
-                    '[data-testid="chat-message"], [data-testid="user-input-step"], [data-testid="conversation-view"] .prose, .prose, .markdown-body'
-                );
+                if (activeChat.isEmpty && !state.isGenerating) {
+                    state.sessionStats.totalTokens = 0;
+                    state.sessionStats.totalRounds = 0;
+                    state.latestRoundStats = {
+                        durationMs: 0,
+                        inputTokens: 0,
+                        outputTokens: 0,
+                        thinkingTokens: 0,
+                        totalRoundTokens: 0,
+                        toolCount: 0,
+                        toolsList: []
+                    };
+                    state.hasTranscriptData = true;
+                } else if (!state.hasTranscriptData) {
+                    // Only scrape DOM if we don't have transcript data yet and chat is not empty
+                    const messageElements = document.querySelectorAll(
+                        '[data-testid="chat-message"], [data-testid="user-input-step"], [data-testid="conversation-view"] .prose, .prose, .markdown-body'
+                    );
 
-                let aggregatedTokens = 3500; // Base system prompt allowance
-                let userTurns = 0;
+                    let aggregatedTokens = 0;
+                    let userTurns = 0;
 
-                messageElements.forEach((el) => {
-                    // Avoid double counting nested prose inside chat-message
-                    if (el.matches('.prose, .markdown-body') && el.closest('[data-testid="chat-message"], [data-testid="user-input-step"]')) {
-                        return;
+                    messageElements.forEach((el) => {
+                        if (el.matches('.prose, .markdown-body') && el.closest('[data-testid="chat-message"], [data-testid="user-input-step"]')) {
+                            return;
+                        }
+                        const text = el.textContent || '';
+                        aggregatedTokens += estimateTokens(text);
+                        if (el.matches('[data-testid="user-input-step"]') || el.querySelector('[data-testid="user-input-step"]')) {
+                            userTurns++;
+                        }
+                    });
+
+                    if (userTurns > 0 || messageElements.length > 0) {
+                        aggregatedTokens += 3500;
                     }
-                    const text = el.textContent || '';
-                    aggregatedTokens += estimateTokens(text);
-                    if (el.matches('[data-testid="user-input-step"]') || el.querySelector('[data-testid="user-input-step"]')) {
-                        userTurns++;
+
+                    state.sessionStats.totalTokens = aggregatedTokens;
+                    state.sessionStats.totalRounds = userTurns;
+
+                    if (state.currentChatKey) {
+                        state.chatMetricsCache[state.currentChatKey] = {
+                            sessionStats: { ...state.sessionStats },
+                            latestRoundStats: { ...state.latestRoundStats },
+                            hasTranscriptData: false,
+                            title: state.currentChatTitle,
+                            id: state.currentChatId
+                        };
                     }
-                });
-
-                // Update active chat token consumption directly
-                state.sessionStats.totalTokens = aggregatedTokens;
-                state.sessionStats.totalRounds = Math.max(1, userTurns);
-
-                if (state.currentChatKey) {
-                    state.chatMetricsCache[state.currentChatKey] = { ...state.sessionStats };
                 }
 
                 // Detect generation status strictly via generation-specific indicators
@@ -577,14 +751,16 @@
             const tokensEl = document.getElementById('agm-topbar-tokens');
 
             const totalTokens = state.sessionStats.totalTokens || 0;
-            const limit = state.config.modelLimit || 1000000;
+            const limit = state.config.modelLimit || 256000;
             const pct = Math.min(100, ((totalTokens / limit) * 100)).toFixed(1);
             const pctStr = `${pct}%`;
-            const color = pct > 80 ? '#ef4444' : pct > 60 ? '#f59e0b' : '#10b981';
+            const zoneInfo = getContextZone(totalTokens, limit);
 
             if (pctEl && pctEl.textContent !== pctStr) {
                 pctEl.textContent = pctStr;
-                pctEl.style.color = color;
+            }
+            if (pctEl) {
+                pctEl.style.color = zoneInfo.color;
             }
             const tokensStr = `(${formatTokens(totalTokens)})`;
             if (tokensEl && tokensEl.textContent !== tokensStr) {
@@ -597,8 +773,8 @@
                 const sbText = `📊 ${pct}% (${formatTokens(totalTokens)})`;
                 if (statusbarBtn.textContent !== sbText) {
                     statusbarBtn.textContent = sbText;
-                    statusbarBtn.style.color = color;
                 }
+                statusbarBtn.style.color = zoneInfo.color;
             }
         }
 
@@ -642,11 +818,14 @@
 
             // 2. Active Chat Identification Card (Fixes Issue 2 & Issue 5)
             const activeChatCard = el('div', 'margin-bottom:10px;display:flex;align-items:center;justify-content:space-between;', [
-                el('div', 'display:flex;align-items:center;gap:6px;overflow:hidden;', [
-                    el('span', 'opacity:0.75;', '💬'),
-                    el('span', 'font-weight:600;font-size:11.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:230px;', 'Active Conversation', { id: 'agm-dash-chat-title' })
+                el('div', 'display:flex;flex-direction:column;gap:2px;overflow:hidden;max-width:230px;', [
+                    el('div', 'display:flex;align-items:center;gap:6px;overflow:hidden;', [
+                        el('span', 'opacity:0.75;', '💬'),
+                        el('span', 'font-weight:600;font-size:11.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;', 'New Conversation', { id: 'agm-dash-chat-title' })
+                    ]),
+                    el('div', 'font-size:9.5px;color:var(--muted-foreground, #a1a1aa);padding-left:18px;', 'Empty session • 0 rounds', { id: 'agm-dash-chat-subtitle' })
                 ]),
-                el('span', 'font-size:10px;color:var(--muted-foreground,#a1a1aa);', 'Chat Scope')
+                el('span', 'font-size:10px;color:var(--muted-foreground,#a1a1aa);align-self:flex-start;margin-top:2px;', 'Chat Scope')
             ], { className: 'agm-card' });
             panel.appendChild(activeChatCard);
 
@@ -656,15 +835,18 @@
 
             const contextCard = el('div', null, [
                 el('div', 'display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;', [
-                    el('span', 'font-weight:600;font-size:11.5px;', 'Context Window'),
+                    el('div', 'display:flex;align-items:center;gap:6px;', [
+                        el('span', 'font-weight:600;font-size:11.5px;', 'Context Window'),
+                        el('span', 'font-size:9.5px;padding:1px 5px;border-radius:4px;font-weight:600;background:#10b98120;color:#10b981;', '🟢 Smart Zone', { id: 'agm-dash-zone-badge' })
+                    ]),
                     el('span', 'font-weight:600;font-size:11.5px;color:#10b981;', '0.0%', { id: 'agm-dash-pct' })
                 ]),
                 progressBar,
                 el('div', 'display:flex;justify-content:space-between;font-size:10.5px;color:var(--muted-foreground, #94a3b8);margin-top:6px;', [
                     el('span', null, '0 used', { id: 'agm-dash-used' }),
-                    el('span', null, '1.0M limit', { id: 'agm-dash-limit' })
+                    el('span', null, '256k limit', { id: 'agm-dash-limit' })
                 ]),
-                el('div', 'font-size:10.5px;color:#10b981;margin-top:4px;', '~1,000,000 tokens remaining', { id: 'agm-dash-remaining' })
+                el('div', 'font-size:10.5px;color:#10b981;margin-top:4px;', '~256.0k tokens remaining', { id: 'agm-dash-remaining' })
             ], { className: 'agm-card' });
             panel.appendChild(contextCard);
 
@@ -697,7 +879,8 @@
 
             // 5. Model Selection & Settings
             const selectModel = el('select', 'width:100%;', [
-                el('option', null, 'Gemini Flash (1,000,000 tokens)', { value: '1000000' }),
+                el('option', null, 'Gemini 3.8 Flash - Antigravity (256,000 tokens)', { value: '256000' }),
+                el('option', null, 'Gemini 3.8 Flash / Pro (1,000,000 tokens)', { value: '1000000' }),
                 el('option', null, 'Gemini Pro Extended (2,000,000 tokens)', { value: '2000000' }),
                 el('option', null, 'Claude 3.7 Sonnet (200,000 tokens)', { value: '200000' }),
                 el('option', null, 'GPT-4o / o1 (128,000 tokens)', { value: '128000' }),
@@ -729,9 +912,9 @@
 
             // Bind Events
             closeBtn.addEventListener('click', () => { closeDashboard(); });
-            selectModel.value = String(state.config.modelLimit || 1000000);
+            selectModel.value = String(state.config.modelLimit || 256000);
             selectModel.addEventListener('change', (e) => {
-                state.config.modelLimit = parseInt(e.target.value, 10) || 1000000;
+                state.config.modelLimit = parseInt(e.target.value, 10) || 256000;
                 saveConfig();
                 updateUI();
             });
@@ -742,6 +925,7 @@
                 updateUI();
             });
             panel.querySelector('#agm-refresh-btn').addEventListener('click', () => {
+                state.hasTranscriptData = false;
                 scanDomMetrics();
                 requestTranscriptUpdate();
                 updateUI();
@@ -803,22 +987,41 @@
             if (!panel || panel.style.display === 'none') return;
 
             const totalTokens = state.sessionStats.totalTokens || 0;
-            const limit = state.config.modelLimit || 1000000;
+            const limit = state.config.modelLimit || 256000;
             const pct = Math.min(100, (totalTokens / limit) * 100);
             const remaining = Math.max(0, limit - totalTokens);
+            const zoneInfo = getContextZone(totalTokens, limit);
 
             const fill = document.getElementById('agm-progress-fill');
             const pctEl = document.getElementById('agm-dash-pct');
+            const zoneBadgeEl = document.getElementById('agm-dash-zone-badge');
             const usedEl = document.getElementById('agm-dash-used');
             const limitEl = document.getElementById('agm-dash-limit');
             const remEl = document.getElementById('agm-dash-remaining');
             const chatTitleEl = document.getElementById('agm-dash-chat-title');
+            const chatSubtitleEl = document.getElementById('agm-dash-chat-subtitle');
             const statusBadge = document.getElementById('agm-dash-status-badge');
 
-            const currentTitle = state.currentChatTitle || 'Active Conversation';
+            const currentTitle = state.currentChatTitle || 'New Conversation';
             if (chatTitleEl && chatTitleEl.textContent !== currentTitle) {
                 chatTitleEl.textContent = currentTitle;
                 chatTitleEl.title = currentTitle;
+            }
+
+            if (chatSubtitleEl) {
+                let subText = '';
+                if (state.currentChatId) {
+                    const shortId = state.currentChatId.slice(0, 8);
+                    const roundsCount = state.sessionStats.totalRounds || 0;
+                    subText = `ID: ${shortId} • ${roundsCount} ${roundsCount === 1 ? 'round' : 'rounds'}`;
+                } else if (state.sessionStats.totalRounds === 0) {
+                    subText = 'Empty session • 0 rounds';
+                } else {
+                    subText = `${state.sessionStats.totalRounds} ${state.sessionStats.totalRounds === 1 ? 'round' : 'rounds'}`;
+                }
+                if (chatSubtitleEl.textContent !== subText) {
+                    chatSubtitleEl.textContent = subText;
+                }
             }
 
             if (statusBadge) {
@@ -831,26 +1034,39 @@
             }
 
             const pctStr = pct.toFixed(1) + '%';
-            const color = pct > 80 ? '#ef4444' : pct > 60 ? '#f59e0b' : '#10b981';
-
-            if (fill && fill.style.width !== pctStr) {
-                fill.style.width = pctStr;
-                fill.style.backgroundColor = color;
+            if (fill) {
+                if (fill.style.width !== pctStr) fill.style.width = pctStr;
+                fill.style.backgroundColor = zoneInfo.color;
             }
             if (pctEl && pctEl.textContent !== pctStr) {
                 pctEl.textContent = pctStr;
-                pctEl.style.color = color;
             }
+            if (pctEl) {
+                pctEl.style.color = zoneInfo.color;
+            }
+            if (zoneBadgeEl) {
+                if (zoneBadgeEl.textContent !== zoneInfo.badge) {
+                    zoneBadgeEl.textContent = zoneInfo.badge;
+                }
+                zoneBadgeEl.style.color = zoneInfo.color;
+                zoneBadgeEl.style.backgroundColor = zoneInfo.bg;
+            }
+
             const usedStr = formatTokens(totalTokens) + ' used';
             if (usedEl && usedEl.textContent !== usedStr) usedEl.textContent = usedStr;
 
             const limitStr = formatTokens(limit) + ' limit';
             if (limitEl && limitEl.textContent !== limitStr) limitEl.textContent = limitStr;
 
-            const remStr = `~${formatTokens(remaining)} tokens remaining`;
+            let remStr = `~${formatTokens(remaining)} tokens remaining`;
+            if (zoneInfo.zone === 'dumb') {
+                remStr += ' (compaction recommended)';
+            }
             if (remEl && remEl.textContent !== remStr) {
                 remEl.textContent = remStr;
-                remEl.style.color = pct > 80 ? '#ef4444' : '#10b981';
+            }
+            if (remEl) {
+                remEl.style.color = zoneInfo.color;
             }
 
             const roundNumEl = document.getElementById('agm-dash-round-num');
@@ -858,7 +1074,7 @@
             const roundTokEl = document.getElementById('agm-dash-round-tokens');
             const roundToolsEl = document.getElementById('agm-dash-round-tools');
 
-            const roundNumStr = 'Round #' + (state.sessionStats.totalRounds || 1);
+            const roundNumStr = 'Round #' + (state.sessionStats.totalRounds || 0);
             if (roundNumEl && roundNumEl.textContent !== roundNumStr) roundNumEl.textContent = roundNumStr;
 
             let displayDur = 0;

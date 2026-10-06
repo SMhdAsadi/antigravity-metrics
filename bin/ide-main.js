@@ -22,6 +22,16 @@ function estimateTokensFast(text) {
     return Math.max(1, Math.ceil(latinChars / 3.65) + Math.ceil(nonAsciiCount / 1.75) + Math.ceil(symbols * 0.12));
 }
 
+function extractFirstPrompt(content) {
+    if (!content || typeof content !== 'string') return '';
+    let text = content;
+    const reqMatch = text.match(/<USER_REQUEST>([\s\S]*?)<\/USER_REQUEST>/i);
+    if (reqMatch) text = reqMatch[1];
+    text = text.replace(/<[^>]+>/g, '').trim();
+    text = text.replace(/\s+/g, ' ').trim();
+    return text;
+}
+
 function findTranscriptForChat(query) {
     try {
         if (!fs.existsSync(BRAIN_DIR)) return null;
@@ -37,31 +47,32 @@ function findTranscriptForChat(query) {
         for (const e of entries) {
             if (!e.isDirectory() || e.name.startsWith('.')) continue;
             const fullPath = path.join(BRAIN_DIR, e.name);
+            const tPath = path.join(fullPath, '.system_generated', 'logs', 'transcript.jsonl');
+            if (!fs.existsSync(tPath)) continue;
             let mtimeMs = 0;
             try {
-                mtimeMs = fs.statSync(fullPath).mtimeMs;
+                mtimeMs = fs.statSync(tPath).mtimeMs;
             } catch (_) {}
-            convDirs.push({ name: e.name, fullPath, mtimeMs });
+            convDirs.push({ id: e.name, fullPath, tPath, mtimeMs });
         }
 
-        // Sort by modification time descending
+        // Sort by actual transcript modification time descending
         convDirs.sort((a, b) => b.mtimeMs - a.mtimeMs);
 
         // If title or firstPrompt provided, search recent transcripts (skip generic titles)
         if (query && (query.title || query.firstPrompt)) {
-            const target = (query.firstPrompt || query.title || '').trim().toLowerCase();
-            if (target.length > 3 && target !== 'active conversation' && target !== 'new conversation') {
-                for (const d of convDirs.slice(0, 25)) {
-                    const tPath = path.join(d.fullPath, '.system_generated', 'logs', 'transcript.jsonl');
-                    if (!fs.existsSync(tPath)) continue;
+            const rawTarget = (query.firstPrompt || query.title || '').trim().toLowerCase();
+            if (rawTarget.length > 3 && rawTarget !== 'active conversation' && rawTarget !== 'new conversation') {
+                const target = rawTarget.slice(0, 30);
+                for (const d of convDirs.slice(0, 30)) {
                     try {
-                        const fd = fs.openSync(tPath, 'r');
-                        const buf = Buffer.alloc(4096);
-                        const bytes = fs.readSync(fd, buf, 0, 4096, 0);
+                        const fd = fs.openSync(d.tPath, 'r');
+                        const buf = Buffer.alloc(8192);
+                        const bytes = fs.readSync(fd, buf, 0, 8192, 0);
                         fs.closeSync(fd);
                         const snippet = buf.toString('utf8', 0, bytes).toLowerCase();
-                        if (snippet.includes(target.slice(0, 30))) {
-                            return tPath;
+                        if (snippet.includes(target)) {
+                            return d.tPath;
                         }
                     } catch (_) {}
                 }
@@ -69,9 +80,8 @@ function findTranscriptForChat(query) {
         }
 
         // Fallback to most recently updated transcript
-        for (const d of convDirs) {
-            const tPath = path.join(d.fullPath, '.system_generated', 'logs', 'transcript.jsonl');
-            if (fs.existsSync(tPath)) return tPath;
+        if (convDirs.length > 0) {
+            return convDirs[0].tPath;
         }
     } catch (_) {}
     return null;
@@ -85,17 +95,21 @@ function parseTranscript(filePath) {
         if (lines.length === 0) return null;
 
         const convId = path.basename(path.dirname(path.dirname(path.dirname(filePath))));
-        let totalTokens = 3500;
+        let totalTokens = 0;
         let totalTools = 0;
         let totalSteps = lines.length;
         let rounds = [];
         let currentRound = null;
+        let firstPrompt = '';
 
         for (const line of lines) {
             try {
                 const step = JSON.parse(line);
                 if (step.type === 'USER_INPUT') {
                     if (currentRound) rounds.push(currentRound);
+                    if (!firstPrompt && step.content) {
+                        firstPrompt = extractFirstPrompt(step.content);
+                    }
                     currentRound = {
                         userStartTime: step.created_at ? new Date(step.created_at).getTime() : Date.now(),
                         lastStepTime: step.created_at ? new Date(step.created_at).getTime() : Date.now(),
@@ -135,6 +149,11 @@ function parseTranscript(filePath) {
             totalTokens += (r.inputTokens + r.outputTokens + r.thinkingTokens);
         }
 
+        // Add base system overhead only when conversation actually has rounds
+        if (rounds.length > 0) {
+            totalTokens += 3500;
+        }
+
         const latest = rounds[rounds.length - 1] || {
             userStartTime: Date.now(),
             lastStepTime: Date.now(),
@@ -149,12 +168,18 @@ function parseTranscript(filePath) {
         const lastStep = lines.length > 0 ? JSON.parse(lines[lines.length - 1]) : null;
         const isAgentRunning = lastStep ? lastStep.status === 'RUNNING' : false;
 
+        const derivedTitle = firstPrompt
+            ? (firstPrompt.length > 36 ? firstPrompt.slice(0, 36) + '...' : firstPrompt)
+            : 'New Conversation';
+
         return {
             conversationId: convId,
+            title: derivedTitle,
+            firstPrompt,
             isAgentRunning,
             sessionStats: {
                 totalTokens,
-                totalRounds: Math.max(1, rounds.length),
+                totalRounds: Math.max(0, rounds.length),
                 totalSteps,
                 totalTools
             },

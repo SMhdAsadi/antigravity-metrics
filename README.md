@@ -27,11 +27,10 @@ It gives you full visibility into context consumption, per-chat token tracking, 
 ## Features
 
 - 📊 **Context Window Health & Per-Chat Usage**:
-  - Dynamically updates as you switch conversations in Antigravity.
-  - Real-time percentage indicator with color-coded gauge (Green `<60%`, Amber `60%-80%`, Crimson `>80%`).
-  - Exact token count (e.g. `48,250 / 1,000,000 tokens`).
-  - Tokens remaining before model compaction or truncation (e.g. `~951,750 tokens left`).
-  - Presets for **Gemini 1.5/2.0 Flash (1M)**, **Gemini Pro (2M)**, **Claude 3.7 Sonnet (200k)**, **GPT-4o (128k)**, or custom limits.
+  - Dynamically updates as you switch conversations in Antigravity without stale state resets.
+  - **Dumb Zone & Cognitive Degradation Awareness**: Color coding dynamically follows LLM attention horizons (🟢 Smart Zone / Optimal, 🟡 Mediocre / Attention Degradation, 🔴 Dumb Zone / Context Rot risk) instead of naive percentage scaling.
+  - Calibrated default for **Gemini 3.8 Flash (Antigravity 256k checkpointer limit)**, with options for **Gemini Pro Extended (2M)**, **Claude 3.7 Sonnet (200k)**, **GPT-4o (128k)**, and custom limits.
+  - Exact token count and compaction recommendations when approaching the Dumb Zone.
 
 - ⏱️ **Per-Message Execution Telemetry**:
   - Attached subtle footer badge on each assistant response:
