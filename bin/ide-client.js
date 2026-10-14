@@ -314,11 +314,11 @@
                     align-items: center !important;
                     justify-content: center !important;
                     font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif !important;
-                    font-size: 12.5px !important;
-                    font-weight: 500 !important;
+                    font-size: 12px !important;
+                    font-weight: 600 !important;
                     line-height: 1 !important;
                     height: 28px !important;
-                    padding: 0 9px !important;
+                    padding: 0 8px !important;
                     border-radius: 6px !important;
                     border: 1px solid var(--border, rgba(255, 255, 255, 0.12)) !important;
                     background-color: transparent !important;
@@ -329,7 +329,6 @@
                     transition: all 0.15s ease !important;
                     app-region: no-drag !important;
                     -webkit-app-region: no-drag !important;
-                    gap: 5px !important;
                     outline: none !important;
                 }
                 .agm-topbar-btn:hover {
@@ -975,30 +974,7 @@
                     title: 'Antigravity Metrics (⌥M / Alt+M)'
                 });
 
-                const svgNS = 'http://www.w3.org/2000/svg';
-                const svg = document.createElementNS(svgNS, 'svg');
-                svg.setAttribute('width', '13');
-                svg.setAttribute('height', '13');
-                svg.setAttribute('viewBox', '0 0 24 24');
-                svg.setAttribute('fill', 'none');
-                svg.setAttribute('stroke', 'currentColor');
-                svg.setAttribute('stroke-width', '2');
-                svg.setAttribute('stroke-linecap', 'round');
-                svg.setAttribute('stroke-linejoin', 'round');
-                svg.setAttribute('class', 'shrink-0 opacity-80');
-                svg.style.marginRight = '2px';
-
-                for (const d of ['M3 3v18h18', 'M18 17V9', 'M13 17V5', 'M8 17v-3']) {
-                    const path = document.createElementNS(svgNS, 'path');
-                    path.setAttribute('d', d);
-                    svg.appendChild(path);
-                }
-
-                const pctSpan = el('span', 'font-weight:600;color:#10b981;', '0.0%', { id: 'agm-topbar-pct' });
-                const tokensSpan = el('span', 'opacity:0.65;font-size:11px;', '(0k)', { id: 'agm-topbar-tokens' });
-
-                btn.appendChild(svg);
-                btn.appendChild(pctSpan);
+                const tokensSpan = el('span', 'font-weight:600;color:#10b981;', '0', { id: 'agm-topbar-tokens' });
                 btn.appendChild(tokensSpan);
 
                 btn.addEventListener('click', (e) => {
@@ -1006,6 +982,17 @@
                     e.stopPropagation();
                     toggleDashboard();
                 });
+            } else {
+                const oldSvg = btn.querySelector('svg');
+                if (oldSvg) oldSvg.remove();
+                const oldPct = document.getElementById('agm-topbar-pct');
+                if (oldPct) oldPct.remove();
+                const tokensSpan = document.getElementById('agm-topbar-tokens');
+                if (tokensSpan) {
+                    tokensSpan.style.opacity = '1';
+                    tokensSpan.style.fontSize = '';
+                    tokensSpan.style.fontWeight = '600';
+                }
             }
 
             // Mount button in topbar actions cluster, next to Open IDE / RTL.
@@ -1039,7 +1026,6 @@
         }
 
         function updateButtonText() {
-            const pctEl = document.getElementById('agm-topbar-pct');
             const tokensEl = document.getElementById('agm-topbar-tokens');
 
             let totalTokens = state.sessionStats.totalTokens || 0;
@@ -1048,28 +1034,30 @@
             }
             const limit = state.config.modelLimit || 256000;
             const pct = Math.min(100, ((totalTokens / limit) * 100)).toFixed(1);
-            const pctStr = `${pct}%`;
             const zoneInfo = getContextZone(totalTokens, limit);
 
-            if (pctEl && pctEl.textContent !== pctStr) {
-                pctEl.textContent = pctStr;
-            }
-            if (pctEl) {
-                pctEl.style.color = zoneInfo.color;
-            }
-            const tokensStr = `(${formatTokens(totalTokens)})`;
+            const tokensStr = formatTokens(totalTokens);
             if (tokensEl && tokensEl.textContent !== tokensStr) {
                 tokensEl.textContent = tokensStr;
+            }
+            if (tokensEl) {
+                tokensEl.style.color = zoneInfo.color;
+            }
+
+            const btn = document.getElementById('agm-topbar-btn');
+            if (btn) {
+                btn.title = `Antigravity Metrics: ${pct}% (${tokensStr} / ${formatTokens(limit)}) (⌥M / Alt+M)`;
             }
 
             // Statusbar button in IDE
             const statusbarBtn = document.getElementById('antigravity-metrics-statusbar-btn');
             if (statusbarBtn) {
-                const sbText = `📊 ${pct}% (${formatTokens(totalTokens)})`;
+                const sbText = tokensStr;
                 if (statusbarBtn.textContent !== sbText) {
                     statusbarBtn.textContent = sbText;
                 }
                 statusbarBtn.style.color = zoneInfo.color;
+                statusbarBtn.title = `Antigravity Metrics: ${pct}% (${tokensStr} / ${formatTokens(limit)}) (Alt+M / ⌥M)`;
             }
         }
 
@@ -1365,7 +1353,7 @@
                     opacity: 0.95;
                     box-sizing: border-box !important;
                 `, [
-                    el('span', null, '📊 0.0% (0k)')
+                    el('span', null, '0')
                 ], {
                     id: 'antigravity-metrics-statusbar-btn',
                     className: 'statusbar-item right',
@@ -1419,10 +1407,20 @@
         });
 
         // Clean up legacy elements from older versions (sidebar pill era,
-        // standalone per-message badge era) if present
+        // standalone per-message badge era, old pct/icon topbar elements) if present
         function cleanLegacyPill() {
             const oldPill = document.getElementById('antigravity-metrics-pill');
             if (oldPill) oldPill.remove();
+            const oldPct = document.getElementById('agm-topbar-pct');
+            if (oldPct) oldPct.remove();
+            const oldSvg = document.querySelector('#agm-topbar-btn > svg');
+            if (oldSvg) oldSvg.remove();
+            const tokensSpan = document.getElementById('agm-topbar-tokens');
+            if (tokensSpan) {
+                tokensSpan.style.opacity = '1';
+                tokensSpan.style.fontSize = '';
+                tokensSpan.style.fontWeight = '600';
+            }
             // The old badges were appended INSIDE the message body and carried
             // guessed numbers. Superseded by .agm-turn-dur, which lives
             // in the native toolbar — strip any left by a previous version so an

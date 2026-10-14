@@ -1,6 +1,6 @@
 {
   "name": "antigravity-metrics",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Real-time token usage, context limits, agent execution timer, and session analytics patcher for Antigravity & Antigravity IDE.",
   "main": "./bin/index.js",
   "keywords": [

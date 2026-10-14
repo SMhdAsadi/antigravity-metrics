@@ -6,7 +6,7 @@ Real-time token usage, context limits, per-turn duration, and telemetry for Anti
 
 ## Features
 
-- **Header button** showing context usage: `[ 📊 4.8% (48.2k) ]`
+- **Header button** showing context usage: `[ 48.2k ]`
 - **Flyout dashboard** (`⌥M` / `Alt+M`) with context window health, zone indicators, and model limit selection
 - **Per-turn duration** rendered inline in each message's action row
 - Model presets: Gemini 3.8 Flash (256k), Gemini Pro Extended (2M), Claude 3.7 Sonnet (200k), GPT-4o (128k), and custom limits
